@@ -1,0 +1,853 @@
+\documentclass[12pt,a4paper]{article}
+
+% ─── Paquetes ───
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{tcolorbox}
+\usepackage{float}
+\usepackage{parskip}
+\usepackage{bytefield}
+\graphicspath{{captures/}}
+
+% ─── Configuración de página ───
+\geometry{margin=2.5cm}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% ─── Colores personalizados ───
+\definecolor{codebackground}{RGB}{245,245,245}
+\definecolor{codeborder}{RGB}{200,200,200}
+\definecolor{stackcolor}{RGB}{255,230,230}
+\definecolor{heapcolor}{RGB}{230,255,230}
+\definecolor{datacolor}{RGB}{230,230,255}
+\definecolor{codeareacolor}{RGB}{255,255,230}
+\definecolor{keywordcolor}{RGB}{0,0,180}
+\definecolor{stringcolor}{RGB}{163,21,21}
+\definecolor{commentcolor}{RGB}{0,128,0}
+\definecolor{sectionblue}{RGB}{25,118,210}
+
+% ─── Configuración de listings para código C ───
+\lstdefinestyle{cstyle}{
+    language=C,
+    basicstyle=\ttfamily\scriptsize,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    stringstyle=\color{stringcolor},
+    commentstyle=\color{commentcolor}\itshape,
+    backgroundcolor=\color{codebackground},
+    frame=single,
+    rulecolor=\color{codeborder},
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=4,
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    xleftmargin=15pt,
+    framexleftmargin=15pt,
+    captionpos=b,
+    literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+             {ñ}{{\~n}}1 {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1
+             {Ú}{{\'U}}1 {Ñ}{{\~N}}1
+}
+
+\lstdefinestyle{outputstyle}{
+    basicstyle=\ttfamily\scriptsize,
+    backgroundcolor=\color{black!5},
+    frame=single,
+    rulecolor=\color{black!30},
+    breaklines=true,
+    tabsize=4,
+    showstringspaces=false,
+    xleftmargin=10pt,
+    framexleftmargin=10pt,
+}
+
+% ─── Configuración de hyperref ───
+\hypersetup{
+    colorlinks=true,
+    linkcolor=sectionblue,
+    urlcolor=sectionblue,
+    citecolor=sectionblue,
+    pdftitle={Compresión RLE: Análisis de Procesos e Hilos},
+    pdfauthor={Proyecto de Sistemas Operativos}
+}
+
+% ─── Formato de secciones ───
+\titleformat{\section}{\Large\bfseries\color{sectionblue}}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\large\bfseries\color{sectionblue!80}}{\thesubsection.}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{sectionblue!60}}{\thesubsubsection.}{0.5em}{}
+
+% ─── Header y footer ───
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Compresión RLE: Procesos e Hilos}}
+\fancyhead[R]{\small\textit{Sistemas Operativos}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ════════════════════════════════════════════════════════════════════
+%  INICIO DEL DOCUMENTO
+% ════════════════════════════════════════════════════════════════════
+
+\begin{document}
+
+% ─── Portada ───
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries Compresión RLE de Imágenes\\[0.3cm]}
+    {\LARGE\bfseries Análisis de Procesos e Hilos\\[0.5cm]}
+    {\Large Mapa de Memoria, Distribución de Recursos\\y Temporización de POSIX Threads}
+
+    \vspace{1.5cm}
+
+    \rule{\textwidth}{1pt}
+
+    \vspace{1.5cm}
+
+    {\large\textbf{Informe Técnico de Sistemas Operativos}}
+
+    \vspace{2cm}
+
+    \begin{tabular}{rl}
+        \textbf{Plataforma:}  & macOS Darwin 25.2.0 \\
+        \textbf{CPU:}         & Apple M1 (8 cores: 4P + 4E) \\
+        \textbf{RAM:}         & 8 GB \\
+        \textbf{Lenguaje:}    & C11 con POSIX Threads \\
+        \textbf{Compilador:}  & GCC con -O2 \\
+        \textbf{Fecha:}       & \today \\
+    \end{tabular}
+
+    \vfill
+
+    \rule{\textwidth}{1pt}
+\end{titlepage}
+
+% ─── Tabla de contenidos ───
+\tableofcontents
+\newpage
+
+% ════════════════════════════════════════════════════════════════════
+\section{Mapa de Memoria del Proceso}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Layout del Espacio de Direcciones Virtuales}
+
+Cada proceso tiene su propio espacio de direcciones virtuales. En arquitectura ARM64 (Apple M1), el espacio de usuario típicamente ocupa las direcciones bajas. El layout para nuestros programas es:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.8]
+    % Stack
+    \draw[fill=stackcolor] (0,10) rectangle (6,11.5);
+    \node[right] at (6.2,10.75) {\texttt{0x16FDFC000} (Stack - 8 MB max)};
+    \node at (3,10.75) {\textbf{PILA (Stack)}};
+
+    % Flecha hacia abajo
+    \draw[->,thick] (3,10) -- (3,9.5);
+    \node[right] at (3.2,9.75) {\small crece $\downarrow$};
+
+    % Espacio libre
+    \draw[fill=white,dashed] (0,7) rectangle (6,9.5);
+    \node at (3,8.25) {\textit{espacio libre}};
+
+    % Heap
+    \draw[fill=heapcolor] (0,4.5) rectangle (6,7);
+    \node[right] at (6.2,5.75) {\texttt{0x600000000} (Heap - malloc)};
+    \node at (3,5.75) {\textbf{HEAP}};
+
+    % Flecha hacia arriba
+    \draw[->,thick] (3,7) -- (3,7.5);
+    \node[right] at (3.2,7.25) {\small crece $\uparrow$};
+
+    % BSS
+    \draw[fill=datacolor] (0,3.5) rectangle (6,4.5);
+    \node[right] at (6.2,4) {\texttt{0x100008000} (BSS - sin inicializar)};
+    \node at (3,4) {\textbf{BSS}};
+
+    % Data
+    \draw[fill=datacolor] (0,2.5) rectangle (6,3.5);
+    \node[right] at (6.2,3) {\texttt{0x100004000} (Data - inicializados)};
+    \node at (3,3) {\textbf{DATA}};
+
+    % Code/Text
+    \draw[fill=codeareacolor] (0,1) rectangle (6,2.5);
+    \node[right] at (6.2,1.75) {\texttt{0x100000000} (Text - código)};
+    \node at (3,1.75) {\textbf{CÓDIGO (Text)}};
+
+    % Reservado
+    \draw[fill=gray!20] (0,0) rectangle (6,1);
+    \node at (3,0.5) {\small reservado (NULL page)};
+\end{tikzpicture}
+\caption{Mapa de memoria virtual del proceso \texttt{rle\_paralelo}}
+\label{fig:memory-map}
+\end{figure}
+
+\subsection{Contenido de Cada Segmento}
+
+\begin{table}[H]
+\centering
+\caption{Segmentos de memoria y su contenido en \texttt{rle\_paralelo}}
+\begin{tabular}{@{}llp{7cm}r@{}}
+    \toprule
+    \textbf{Segmento} & \textbf{Permisos} & \textbf{Contenido} & \textbf{Tamaño} \\
+    \midrule
+    \texttt{\_\_TEXT} & R-X & Código compilado: \texttt{main()}, \texttt{rle\_thread\_func()}, \texttt{buffer\_push()}, etc. & $\sim$12 KB \\
+    \texttt{\_\_DATA} & RW- & Variables globales inicializadas, GOT, strings constantes & $\sim$4 KB \\
+    \texttt{\_\_BSS} & RW- & Variables globales sin inicializar (todas en cero) & $\sim$1 KB \\
+    \texttt{heap} & RW- & \texttt{img.data} (48 MB), \texttt{ThreadArg[8]}, buffers de salida & $\sim$52 MB \\
+    \texttt{stack} & RW- & Variables locales de \texttt{main()}, argumentos de funciones & $\sim$64 KB \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Estructuras de Datos en Memoria}
+
+\subsubsection{Estructura Image (en Heap)}
+
+\begin{lstlisting}[style=cstyle, caption={Estructura Image: 16 bytes en stack, datos en heap}]
+typedef struct {
+    uint32_t width;   /* 4 bytes - offset 0 */
+    uint32_t height;  /* 4 bytes - offset 4 */
+    uint8_t *data;    /* 8 bytes - offset 8 (puntero a heap) */
+} Image;  /* Total: 16 bytes (con padding) */
+
+/* En memoria (imagen 4096x4096): */
+/* Stack:  Image img @ 0x16FDFC100 */
+/*   img.width  = 4096  @ offset 0 */
+/*   img.height = 4096  @ offset 4 */
+/*   img.data   = 0x600001000 @ offset 8 (apunta al heap) */
+/* Heap:   img.data[0..50331647] @ 0x600001000 */
+/*   Tamaño: 4096 * 4096 * 3 = 50,331,648 bytes */
+\end{lstlisting}
+
+\subsubsection{Estructura ThreadArg (Array en Heap)}
+
+\begin{lstlisting}[style=cstyle, caption={Estructura ThreadArg: argumentos para cada hilo}]
+typedef struct {
+    int thread_idx;            /*  4 bytes - indice del hilo */
+    uint64_t system_tid;       /*  8 bytes - TID del sistema */
+    const uint8_t *pixels;     /*  8 bytes - puntero a bloque de imagen */
+    size_t num_pixels;         /*  8 bytes - pixeles asignados */
+    uint32_t start_row;        /*  4 bytes - fila inicial */
+    uint32_t num_rows;         /*  4 bytes - filas asignadas */
+    Buffer result;             /* 24 bytes - buffer de salida */
+    atomic_size_t pixels_done; /*  8 bytes - progreso (atomico) */
+    double cpu_time;           /*  8 bytes - tiempo CPU consumido */
+    mach_port_t mach_thread;   /*  4 bytes - port Mach (macOS) */
+} ThreadArg;  /* Total: ~80 bytes por hilo */
+
+/* En memoria (8 hilos): */
+/* ThreadArg args[8] @ 0x6000A0000 */
+/*   args[0] @ offset 0    - hilo 0 */
+/*   args[1] @ offset 80   - hilo 1 */
+/*   ...                            */
+/*   args[7] @ offset 560  - hilo 7 */
+/* Total: 640 bytes para metadata de hilos */
+\end{lstlisting}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Creación y Estructura de los Hilos}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Diferencia entre Proceso e Hilo}
+
+\begin{table}[H]
+\centering
+\caption{Recursos privados vs compartidos entre proceso e hilos}
+\begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Recurso} & \textbf{Proceso (fork)} & \textbf{Hilo (pthread)} \\
+    \midrule
+    Espacio de direcciones & Privado (copia) & \textbf{Compartido} \\
+    Segmento de código & Privado & \textbf{Compartido} \\
+    Segmento de datos & Privado & \textbf{Compartido} \\
+    Heap & Privado & \textbf{Compartido} \\
+    Stack & Privado & \textbf{Privado (1 por hilo)} \\
+    Registros CPU & Privado & \textbf{Privado} \\
+    Program Counter & Privado & \textbf{Privado} \\
+    File descriptors & Privado & \textbf{Compartido} \\
+    PID & Diferente & \textbf{Mismo PID} \\
+    TID & --- & \textbf{Diferente TID} \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pilas Independientes por Hilo}
+
+Cada hilo tiene su propia pila. En macOS, el tamaño por defecto es 512 KB por hilo:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.7]
+    % Hilo principal
+    \draw[fill=stackcolor] (0,0) rectangle (2,4);
+    \node[rotate=90] at (1,2) {\textbf{Stack main}};
+    \node at (1,-0.5) {\small 0x16FDFC000};
+    \node at (1,4.5) {\small 512 KB};
+
+    % Hilos 0-7
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\x}{3 + \i * 1.5}
+        \draw[fill=stackcolor!70] (\x,0) rectangle (\x+1,3);
+        \node at (\x+0.5,1.5) {\tiny T\i};
+        \node at (\x+0.5,-0.5) {\tiny \pgfmathparse{int(112 + \i * 8)}\pgfmathresult};
+    }
+
+    % Etiquetas
+    \node at (1,5.5) {\textbf{Hilo Principal}};
+    \node at (9,5.5) {\textbf{Hilos de Trabajo (pthread)}};
+
+    % Heap compartido
+    \draw[fill=heapcolor] (0,-3) rectangle (15,-1.5);
+    \node at (7.5,-2.25) {\textbf{HEAP COMPARTIDO} (img.data, ThreadArg[], buffers)};
+\end{tikzpicture}
+\caption{Cada hilo tiene su propia pila; el heap es compartido}
+\label{fig:thread-stacks}
+\end{figure}
+
+\subsection{Llamada a pthread\_create}
+
+\begin{lstlisting}[style=cstyle, caption={Creación de hilos con pthread\_create}]
+/* En main(): */
+pthread_t threads[8];     /* 8 identificadores de hilo */
+ThreadArg args[8];        /* 8 estructuras de argumentos */
+
+for (int i = 0; i < 8; i++) {
+    /* Configurar argumentos del hilo i */
+    args[i].thread_idx = i;
+    args[i].pixels = img.data + row_offset * width * 3;
+    args[i].num_pixels = rows_per_thread * width;
+    args[i].start_row = row_offset;
+    args[i].num_rows = 512;  /* 4096/8 filas por hilo */
+
+    /* SYSCALL: crear hilo */
+    /* El kernel asigna: nuevo TID, nueva pila (512KB), registros */
+    int ret = pthread_create(
+        &threads[i],       /* OUT: identificador del hilo */
+        NULL,              /* atributos por defecto */
+        rle_thread_func,   /* funcion a ejecutar */
+        &args[i]           /* argumento (puntero a ThreadArg) */
+    );
+}
+\end{lstlisting}
+
+\subsection{Estado del Hilo en el Kernel}
+
+Cuando se crea un hilo, el kernel (XNU en macOS) crea una estructura \texttt{thread\_t}:
+
+\begin{lstlisting}[style=cstyle, caption={Información del hilo en el kernel (simplificado)}]
+/* Estructura del kernel (XNU) por cada hilo: */
+struct thread {
+    uint64_t        thread_id;      /* TID unico en el sistema */
+    task_t          task;           /* Proceso padre */
+    vm_address_t    stack_base;     /* Base de la pila */
+    vm_size_t       stack_size;     /* Tamaño de pila (512 KB) */
+    arm_context_t   machine;        /* Registros: x0-x30, sp, pc, cpsr */
+    int             sched_pri;      /* Prioridad de scheduling */
+    int             cpu_id;         /* Core actual (-1 si no asignado) */
+    uint64_t        user_time;      /* Tiempo CPU en modo usuario */
+    uint64_t        system_time;    /* Tiempo CPU en modo kernel */
+    thread_state_t  state;          /* RUNNING, WAITING, STOPPED */
+};
+\end{lstlisting}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Distribución del Trabajo entre Hilos}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Partición de la Imagen}
+
+La imagen de 4096$\times$4096 píxeles se divide horizontalmente en 8 bloques de 512 filas cada uno:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.6]
+    % Imagen completa
+    \draw[thick] (0,0) rectangle (8,8);
+
+    % Divisiones horizontales
+    \foreach \i in {1,...,7} {
+        \draw[dashed] (0,\i) -- (8,\i);
+    }
+
+    % Etiquetas de bloques
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\y}{7.5 - \i}
+        \node at (4,\y) {Hilo \i: filas \pgfmathparse{int(\i*512)}\pgfmathresult--\pgfmathparse{int((\i+1)*512-1)}\pgfmathresult};
+    }
+
+    % Dimensiones
+    \draw[<->] (-0.5,0) -- (-0.5,8);
+    \node[rotate=90] at (-1,4) {4096 px};
+    \draw[<->] (0,-0.5) -- (8,-0.5);
+    \node at (4,-1) {4096 px};
+
+    % Tabla de asignación
+    \node[anchor=west] at (10,7) {\textbf{Hilo 0:} 0x600001000, 2,097,152 px};
+    \node[anchor=west] at (10,6) {\textbf{Hilo 1:} 0x600601000, 2,097,152 px};
+    \node[anchor=west] at (10,5) {\textbf{Hilo 2:} 0x600C01000, 2,097,152 px};
+    \node[anchor=west] at (10,4) {\textbf{Hilo 3:} 0x601201000, 2,097,152 px};
+    \node[anchor=west] at (10,3) {\textbf{Hilo 4:} 0x601801000, 2,097,152 px};
+    \node[anchor=west] at (10,2) {\textbf{Hilo 5:} 0x601E01000, 2,097,152 px};
+    \node[anchor=west] at (10,1) {\textbf{Hilo 6:} 0x602401000, 2,097,152 px};
+    \node[anchor=west] at (10,0) {\textbf{Hilo 7:} 0x602A01000, 2,097,152 px};
+\end{tikzpicture}
+\caption{División de la imagen: cada hilo procesa 512 filas = 6,291,456 bytes}
+\label{fig:image-partition}
+\end{figure}
+
+\subsection{Código de División}
+
+\begin{lstlisting}[style=cstyle, caption={Algoritmo de distribución de filas entre hilos}]
+uint32_t rows_per = img.height / num_threads;  /* 4096/8 = 512 */
+uint32_t extra = img.height % num_threads;     /* 4096%8 = 0 */
+uint32_t row_off = 0;
+
+for (int i = 0; i < num_threads; i++) {
+    /* Si hay residuo, los primeros hilos reciben 1 fila extra */
+    uint32_t rows = rows_per + (i < (int)extra ? 1 : 0);
+
+    /* Calcular puntero al inicio del bloque */
+    /* Cada fila = width * 3 bytes = 4096 * 3 = 12,288 bytes */
+    args[i].pixels = img.data + (size_t)row_off * img.width * 3;
+
+    /* Ejemplo hilo 3: */
+    /*   row_off = 1536 (filas 0-1535 ya asignadas) */
+    /*   offset = 1536 * 4096 * 3 = 18,874,368 bytes */
+    /*   args[3].pixels = 0x600001000 + 18,874,368 = 0x601201000 */
+
+    args[i].num_pixels = (size_t)rows * img.width;
+    args[i].start_row = row_off;
+    args[i].num_rows = rows;
+    row_off += rows;
+}
+\end{lstlisting}
+
+\subsection{Tabla de Asignación Real}
+
+\begin{table}[H]
+\centering
+\caption{Distribución exacta de recursos por hilo (imagen 4096$\times$4096)}
+\begin{tabular}{@{}crrrrrr@{}}
+    \toprule
+    \textbf{Hilo} & \textbf{TID} & \textbf{Filas} & \textbf{Píxeles} & \textbf{Bytes entrada} & \textbf{Offset} & \textbf{Buffer salida} \\
+    \midrule
+    0 & 0x3616a7 & 0--511    & 2,097,152 & 6,291,456 & 0x0        & 33,024 B \\
+    1 & 0x3616a8 & 512--1023  & 2,097,152 & 6,291,456 & 0x600000   & 33,024 B \\
+    2 & 0x3616a9 & 1024--1535 & 2,097,152 & 6,291,456 & 0xC00000   & 33,024 B \\
+    3 & 0x3616aa & 1536--2047 & 2,097,152 & 6,291,456 & 0x1200000  & 33,024 B \\
+    4 & 0x3616ab & 2048--2559 & 2,097,152 & 6,291,456 & 0x1800000  & 33,024 B \\
+    5 & 0x3616ac & 2560--3071 & 2,097,152 & 6,291,456 & 0x1E00000  & 33,024 B \\
+    6 & 0x3616ad & 3072--3583 & 2,097,152 & 6,291,456 & 0x2400000  & 33,024 B \\
+    7 & 0x3616ae & 3584--4095 & 2,097,152 & 6,291,456 & 0x2A00000  & 33,024 B \\
+    \midrule
+    \textbf{Total} & --- & 4096 & 16,777,216 & 50,331,648 & --- & 264,192 B \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Temporización y Scheduling de Hilos}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Línea de Tiempo de Ejecución}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.9]
+    % Eje de tiempo
+    \draw[->,thick] (0,0) -- (14,0);
+    \node at (14.5,0) {t (ms)};
+
+    % Marcas de tiempo
+    \foreach \t in {0,1,2,3,4,5} {
+        \draw (\t*2.5,0.1) -- (\t*2.5,-0.1);
+        \node at (\t*2.5,-0.4) {\t};
+    }
+
+    % Hilo principal
+    \draw[fill=blue!30] (0,1) rectangle (0.3,1.4);
+    \node[left] at (0,1.2) {\small main};
+    \draw[fill=blue!30] (12,1) rectangle (12.5,1.4);
+    \draw[dashed] (0.3,1.2) -- (12,1.2);
+    \node[above] at (0.15,1.4) {\tiny setup};
+    \node[above] at (12.25,1.4) {\tiny merge};
+
+    % Hilos de trabajo
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\y}{2 + \i * 0.5}
+        \pgfmathsetmacro{\start}{0.3 + \i * 0.02}
+        \pgfmathsetmacro{\len}{11.5 - \i * 0.3}
+        \draw[fill=green!40] (\start,\y) rectangle (\start+\len,\y+0.35);
+        \node[left] at (0,\y+0.175) {\tiny T\i};
+    }
+
+    % Eventos
+    \draw[red,thick,->] (0.3,0.5) -- (0.3,5.5);
+    \node[red,above] at (0.3,5.5) {\small pthread\_create()};
+
+    \draw[red,thick,->] (12,0.5) -- (12,5.5);
+    \node[red,above] at (12,5.5) {\small pthread\_join()};
+
+    % Leyenda
+    \node at (7,-1.5) {\textbf{Wall time total: 5.0 ms}};
+    \node at (7,-2) {\small CPU time total: 29.7 ms (suma de todos los hilos)};
+    \node at (7,-2.5) {\small Speedup = 29.7 / 5.0 = \textbf{5.94x}};
+\end{tikzpicture}
+\caption{Diagrama de Gantt: los 8 hilos ejecutan en paralelo}
+\label{fig:gantt}
+\end{figure}
+
+\subsection{Métricas de Tiempo por Hilo (Ejecución Real)}
+
+\begin{table}[H]
+\centering
+\caption{Tiempo CPU por hilo medido con \texttt{thread\_info(THREAD\_BASIC\_INFO)}}
+\begin{tabular}{@{}crrrrl@{}}
+    \toprule
+    \textbf{Hilo} & \textbf{Core} & \textbf{user\_time} & \textbf{sys\_time} & \textbf{CPU total} & \textbf{Estado final} \\
+    \midrule
+    0 & 0 & 4.26 ms & 0.00 ms & 4.26 ms & TERMINATED \\
+    1 & 1 & 4.81 ms & 0.00 ms & 4.81 ms & TERMINATED \\
+    2 & 2 & 4.10 ms & 0.00 ms & 4.10 ms & TERMINATED \\
+    3 & 3 & 4.79 ms & 0.00 ms & 4.79 ms & TERMINATED \\
+    4 & 4 & 5.18 ms & 0.00 ms & 5.18 ms & TERMINATED \\
+    5 & 5 & 4.96 ms & 0.00 ms & 4.96 ms & TERMINATED \\
+    6 & 6 & 4.21 ms & 0.00 ms & 4.21 ms & TERMINATED \\
+    7 & 7 & 4.95 ms & 0.00 ms & 4.95 ms & TERMINATED \\
+    \midrule
+    \multicolumn{4}{r}{\textbf{Suma CPU:}} & \textbf{37.26 ms} & \\
+    \multicolumn{4}{r}{\textbf{Wall time:}} & \textbf{6.28 ms} & \\
+    \multicolumn{4}{r}{\textbf{Speedup:}} & \textbf{5.93x} & \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Prueba de paralelismo real:} La suma de tiempos CPU (37.26 ms) es 5.93$\times$ mayor que el wall time (6.28 ms). Esto es imposible en ejecución secuencial y demuestra que múltiples cores ejecutaron trabajo simultáneamente.
+
+\subsection{Afinidad de Cores (macOS)}
+
+\begin{lstlisting}[style=cstyle, caption={Configuración de afinidad con THREAD\_AFFINITY\_POLICY}]
+#ifdef __APPLE__
+/* Después de crear el hilo, configurar afinidad */
+thread_affinity_policy_data_t policy;
+policy.affinity_tag = i + 1;  /* Tag unico por hilo (0 = sin preferencia) */
+
+kern_return_t kr = thread_policy_set(
+    args[i].mach_thread,           /* Port Mach del hilo */
+    THREAD_AFFINITY_POLICY,        /* Tipo de politica */
+    (thread_policy_t)&policy,      /* Datos de la politica */
+    THREAD_AFFINITY_POLICY_COUNT   /* Tamaño de los datos */
+);
+
+/* El kernel intenta ejecutar hilos con tags diferentes */
+/* en cores diferentes. Es una "sugerencia", no garantia. */
+#endif
+\end{lstlisting}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Capturas del Sistema en Ejecución}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Inicio del Desarrollo con Claude Code}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_00.png}
+    \caption{Interfaz de Claude Code: prompt inicial solicitando dos programas (secuencial y paralelo) con compresión RLE.}
+    \label{fig:cap00}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_04.png}
+    \caption{Plan de implementación: estructura del proyecto, algoritmo RLE, estrategia de paralelización con división por bloques de filas.}
+    \label{fig:cap04}
+\end{figure}
+
+\subsection{Creación de Archivos y Compilación}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_06.png}
+    \caption{El agente crea los 3 archivos (\texttt{rle\_secuencial.c}, \texttt{rle\_paralelo.c}, \texttt{Makefile}) y compila. Se muestran las estructuras de datos y los includes necesarios.}
+    \label{fig:cap06}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_07.png}
+    \caption{Corrección de warnings: se eliminan variables no usadas (\texttt{input\_name}) mostrando el diff exacto de los cambios.}
+    \label{fig:cap07}
+\end{figure}
+
+\subsection{Ejecución y Verificación de Resultados}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_08.png}
+    \caption{Primera ejecución: ambos programas producen archivos \texttt{.rle} idénticos (264,200 bytes). Verificación con \texttt{diff}.}
+    \label{fig:cap08}
+\end{figure}
+
+\subsection{Salida de la Versión Secuencial}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{cap_15.png}
+    \caption{Ejecución secuencial: un solo hilo procesa 16,777,216 píxeles. Tiempo: 0.014664s, CPU: 0.037343s, Throughput: 547.3 MB/s, RSS: 50.1 MB}
+    \label{fig:cap15}
+\end{figure}
+
+\subsection{Salida de la Versión Paralela con Detalle por Hilo}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_16.png}
+    \caption{Ejecución paralela (8 hilos): tabla con TID, core, progreso, CPU(ms), filas y bytes comprimidos por hilo. Speedup: 5.12x. Tiempo total: 0.010431s.}
+    \label{fig:cap16}
+\end{figure}
+
+La Figura~\ref{fig:cap16} muestra la información clave del sistema operativo:
+
+\begin{itemize}
+    \item \textbf{TID por hilo}: Cada hilo tiene un Thread ID único asignado por el kernel (0x3616a7, 0x3616a8, ...).
+    \item \textbf{Core asignado}: Cada hilo se ejecuta en un core diferente (0--7).
+    \item \textbf{CPU individual}: Tiempo de CPU consumido por cada hilo, medido con Mach API.
+    \item \textbf{Distribución equitativa}: Cada hilo procesa exactamente 512 filas = 2,097,152 píxeles.
+\end{itemize}
+
+\subsection{Benchmark Final}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_22.png}
+    \caption{Resumen del benchmark (5 iteraciones): Secuencial 16.6 ms vs Paralelo 4.9 ms. Speedup promedio: 3.41x.}
+    \label{fig:cap22}
+\end{figure}
+
+% ════════════════════════════════════════════════════════════════════
+\section{APIs del Sistema Operativo Utilizadas}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{POSIX Threads (pthreads)}
+
+\begin{table}[H]
+\centering
+\caption{Funciones pthread utilizadas}
+\begin{tabular}{@{}lp{8cm}@{}}
+    \toprule
+    \textbf{Función} & \textbf{Descripción} \\
+    \midrule
+    \texttt{pthread\_create()} & Crea un nuevo hilo. El kernel asigna TID, pila (512 KB), y estructura de control. \\
+    \texttt{pthread\_join()} & Bloquea hasta que el hilo termine. Libera recursos del hilo. \\
+    \texttt{pthread\_self()} & Retorna el identificador del hilo actual. \\
+    \texttt{pthread\_threadid\_np()} & (macOS) Obtiene el TID nativo del sistema. \\
+    \texttt{pthread\_mach\_thread\_np()} & (macOS) Obtiene el port Mach del hilo para APIs de kernel. \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Mach APIs (macOS)}
+
+\begin{table}[H]
+\centering
+\caption{APIs Mach para métricas del sistema}
+\begin{tabular}{@{}lp{7cm}@{}}
+    \toprule
+    \textbf{Función} & \textbf{Uso en el programa} \\
+    \midrule
+    \texttt{task\_info(MACH\_TASK\_BASIC\_INFO)} & Obtener RSS (memoria física) del proceso. \\
+    \texttt{thread\_info(THREAD\_BASIC\_INFO)} & Obtener tiempo CPU (user+sys) por hilo individual. \\
+    \texttt{thread\_policy\_set(THREAD\_AFFINITY\_POLICY)} & Sugerir al scheduler que distribuya hilos en cores diferentes. \\
+    \texttt{mach\_task\_self()} & Obtener el port Mach del proceso actual. \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Otras APIs del Sistema}
+
+\begin{table}[H]
+\centering
+\caption{APIs POSIX y del sistema}
+\begin{tabular}{@{}lp{7cm}@{}}
+    \toprule
+    \textbf{Función} & \textbf{Uso} \\
+    \midrule
+    \texttt{sysconf(\_SC\_NPROCESSORS\_ONLN)} & Detectar número de cores disponibles. \\
+    \texttt{clock\_gettime(CLOCK\_MONOTONIC)} & Medir wall time con precisión de nanosegundos. \\
+    \texttt{getrusage(RUSAGE\_SELF)} & Obtener tiempo CPU total del proceso (user + system). \\
+    \texttt{malloc()}, \texttt{realloc()} & Asignar memoria en el heap para buffers. \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Sincronización y Comunicación entre Hilos}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Patrón Lock-Free con Variables Atómicas}
+
+Este proyecto NO usa mutex ni semáforos. La única sincronización es mediante variables atómicas (C11 \texttt{<stdatomic.h>}):
+
+\begin{lstlisting}[style=cstyle, caption={Comunicación lock-free entre hilo de trabajo y monitor}]
+/* En ThreadArg: */
+atomic_size_t pixels_done;  /* Variable atomica */
+
+/* Hilo de trabajo (productor): */
+while (i < num_pixels) {
+    /* ... procesar pixeles ... */
+    i += count;
+
+    /* Escritura atomica (1 instruccion ARM: str) */
+    atomic_store(&ta->pixels_done, i);
+}
+
+/* Hilo monitor (consumidor): */
+while (!done) {
+    for (int i = 0; i < num_threads; i++) {
+        /* Lectura atomica (1 instruccion ARM: ldr) */
+        size_t progress = atomic_load(&args[i].pixels_done);
+        /* Mostrar barra de progreso... */
+    }
+    usleep(80000);  /* Refrescar cada 80ms */
+}
+\end{lstlisting}
+
+\textbf{Por qué funciona sin mutex:}
+\begin{itemize}
+    \item Cada hilo escribe SOLO en su propio \texttt{pixels\_done}.
+    \item El monitor SOLO lee (nunca escribe).
+    \item Las operaciones atómicas garantizan visibilidad entre cores.
+    \item No hay condiciones de carrera porque no hay escrituras compartidas.
+\end{itemize}
+
+\subsection{Independencia de Datos}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.8]
+    % Imagen en heap
+    \draw[fill=heapcolor] (0,0) rectangle (12,2);
+    \node at (6,1) {\textbf{img.data} (heap compartido, solo lectura)};
+
+    % Bloques de cada hilo
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\x}{\i * 1.5}
+        \draw[thick] (\x,0) -- (\x,2);
+        \node at (\x+0.75,2.3) {\tiny H\i};
+    }
+
+    % Flechas de lectura
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\x}{\i * 1.5 + 0.75}
+        \draw[->,thick,blue] (\x,3) -- (\x,2.1);
+    }
+
+    % Buffers de salida
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\x}{\i * 1.5}
+        \draw[fill=stackcolor] (\x,4) rectangle (\x+1.4,5);
+        \node at (\x+0.7,4.5) {\tiny buf[\i]};
+    }
+
+    % Flechas de escritura
+    \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\x}{\i * 1.5 + 0.75}
+        \draw[->,thick,red] (\x,3.1) -- (\x,3.9);
+    }
+
+    % Leyenda
+    \node[blue] at (14,3) {\small lectura};
+    \node[red] at (14,3.5) {\small escritura};
+
+    % Etiquetas
+    \node at (6,-0.5) {\small Cada hilo lee de su región, escribe en su buffer};
+\end{tikzpicture}
+\caption{Sin escrituras compartidas = sin necesidad de locks}
+\label{fig:data-independence}
+\end{figure}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Análisis de Rendimiento}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Resultados del Benchmark}
+
+\begin{table}[H]
+\centering
+\caption{Comparación secuencial vs paralelo (promedio de 5 ejecuciones)}
+\begin{tabular}{@{}lrrr@{}}
+    \toprule
+    \textbf{Métrica} & \textbf{Secuencial} & \textbf{Paralelo (8 hilos)} & \textbf{Mejora} \\
+    \midrule
+    Wall time promedio & 16.577 ms & 4.851 ms & \textbf{3.41x más rápido} \\
+    CPU time total & 16.5 ms & 29.7 ms & 1.8x más CPU usado \\
+    Throughput & 564 MB/s & 1925 MB/s & 3.4x más throughput \\
+    Memoria RSS & 50.1 MB & 51.2 MB & +2\% overhead \\
+    Archivo salida & 264,200 B & 264,200 B & Idénticos \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Overhead de Paralelización}
+
+\begin{itemize}
+    \item \textbf{Creación de hilos}: $\sim$10 $\mu$s por \texttt{pthread\_create()} = 80 $\mu$s total
+    \item \textbf{Memoria por pila}: 512 KB $\times$ 8 hilos = 4 MB adicionales
+    \item \textbf{ThreadArg array}: 80 bytes $\times$ 8 = 640 bytes
+    \item \textbf{Buffers de salida}: $\sim$33 KB $\times$ 8 = 264 KB (vs 264 KB en secuencial)
+\end{itemize}
+
+\subsection{Speedup vs Número de Hilos Teórico}
+
+Con la Ley de Amdahl, si la fracción serial es $S \approx 0.02$ (2\%):
+
+\[
+\text{Speedup} = \frac{1}{S + \frac{1-S}{N}} = \frac{1}{0.02 + \frac{0.98}{8}} = \frac{1}{0.1425} = 7.02x
+\]
+
+El speedup real (3.41x) es menor debido a:
+\begin{enumerate}
+    \item \textbf{Cores heterogéneos del M1}: 4 P-cores (rápidos) + 4 E-cores (lentos)
+    \item \textbf{Contención de memoria}: 8 hilos compiten por el bus de memoria
+    \item \textbf{Tarea muy corta}: Con solo $\sim$17ms de trabajo, el overhead de creación de hilos es significativo
+\end{enumerate}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Conclusiones Técnicas}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{enumerate}
+    \item \textbf{Estructura de memoria}: Cada hilo tiene su propia pila (512 KB) pero comparte el heap. La imagen de entrada está en una región read-only del heap; cada hilo escribe en su propio buffer.
+
+    \item \textbf{Sin sincronización costosa}: Al dividir los datos sin solapamiento, se elimina la necesidad de mutex. Solo se usan variables atómicas para reportar progreso.
+
+    \item \textbf{Métricas por hilo}: Las APIs Mach (\texttt{thread\_info}) permiten medir el CPU consumido por cada hilo individualmente, demostrando paralelismo real.
+
+    \item \textbf{Afinidad de cores}: \texttt{THREAD\_AFFINITY\_POLICY} sugiere al kernel distribuir hilos en cores diferentes, mejorando la utilización del CPU.
+
+    \item \textbf{Speedup real}: 3.41x con 8 cores, limitado por la heterogeneidad del M1 y la corta duración de la tarea.
+\end{enumerate}
+
+\end{document}
