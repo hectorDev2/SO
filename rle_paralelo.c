@@ -1,58 +1,16 @@
 /*
  * ============================================================================
- *  rle_paralelo.c — Compresión RLE de Imágenes (Versión Paralela con Pthreads)
- * ============================================================================
+ *  rle_paralelo.c — Compresión RLE (Versión Paralela con Pthreads)
  *
- *  DESCRIPCIÓN:
- *      Implementa el algoritmo de compresión Run-Length Encoding (RLE) sobre
- *      imágenes RGB utilizando MÚLTIPLES HILOS de ejecución (uno por core
- *      disponible) mediante la biblioteca POSIX Threads (pthreads).
+ *  Muestra información detallada de los segmentos de memoria:
+ *    - PILA (Stack): Stack del hilo principal + stack de cada pthread
+ *    - CÓDIGO (Text): Funciones del programa, sus direcciones
+ *    - DATOS (Data/BSS/Heap): Variables globales, buffers dinámicos
  *
- *  ESTRATEGIA DE PARALELIZACIÓN:
- *      La imagen se divide horizontalmente en N bloques de filas, donde N es
- *      el número de cores del procesador (detectados con sysconf). Cada hilo
- *      comprime su bloque de forma completamente independiente en un buffer
- *      local, eliminando la necesidad de sincronización durante el cómputo.
- *
- *      ┌─────────────────────┐
- *      │  Bloque 0 (Hilo 0) │ ← filas 0 a 511
- *      ├─────────────────────┤
- *      │  Bloque 1 (Hilo 1) │ ← filas 512 a 1023
- *      ├─────────────────────┤
- *      │  Bloque 2 (Hilo 2) │ ← filas 1024 a 1535
- *      ├─────────────────────┤
- *      │       ...           │
- *      ├─────────────────────┤
- *      │  Bloque N (Hilo N) │ ← filas restantes
- *      └─────────────────────┘
- *
- *      Después del join, el hilo principal concatena los buffers comprimidos
- *      en orden para producir el archivo final.
- *
- *  AFINIDAD DE CORES (macOS):
- *      En macOS, se usa thread_policy_set con THREAD_AFFINITY_POLICY para
- *      sugerir al scheduler que distribuya los hilos en cores diferentes.
- *      Cada hilo recibe un tag de afinidad único, indicando al kernel que
- *      hilos con tags diferentes deberían ejecutarse en cores separados.
- *
- *  MÉTRICAS POR HILO:
- *      - TID del sistema (thread ID nativo del OS)
- *      - Core asignado (índice lógico)
- *      - Progreso individual (barra visual)
- *      - Tiempo de CPU consumido (vía Mach thread_info en macOS)
- *      - Filas y píxeles asignados
- *      - Bytes comprimidos producidos
- *
- *  COMPILACIÓN:
- *      gcc -Wall -Wextra -O2 -o rle_paralelo rle_paralelo.c -lpthread
- *
- *  USO:
- *      ./rle_paralelo                    # imagen sintética 4096×4096
- *      ./rle_paralelo imagen.ppm         # archivo PPM real
- *
- *  AUTOR:   Proyecto de Sistemas Operativos
- *  FECHA:   2025
- *  LICENCIA: Uso educativo
+ *  También muestra:
+ *    - PID, TID de cada hilo
+ *    - Distribución de recursos entre hilos
+ *    - Tiempo CPU individual por hilo
  * ============================================================================
  */
 
@@ -60,34 +18,44 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <time.h>           /* clock_gettime, CLOCK_MONOTONIC */
-#include <sys/resource.h>   /* getrusage — tiempos CPU del proceso */
-#include <unistd.h>         /* usleep, sysconf */
-#include <stdatomic.h>      /* atomic_size_t — progreso sin locks */
-#include <pthread.h>        /* pthread_create/join — paralelismo */
+#include <time.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
 #ifdef __APPLE__
-#include <mach/mach.h>           /* task_info — memoria RSS */
-#include <mach/thread_policy.h>  /* thread_policy_set — afinidad de cores */
-#include <mach/thread_act.h>     /* thread_info — CPU por hilo */
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+#include <mach/thread_act.h>
+#include <mach/thread_policy.h>
+#include <sys/sysctl.h>
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 1: ESTRUCTURAS DE DATOS
+ *  SEGMENTO DATA: Variables globales (inicializadas y no inicializadas)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * Image: Imagen RGB en memoria (ver documentación en rle_secuencial.c).
- */
+/* Variables en segmento DATA (inicializadas) */
+static int g_initialized_var = 42;
+static const char *g_program_name = "RLE Paralelo";
+static int g_num_threads_config = 8;
+
+/* Variables en segmento BSS (no inicializadas, se inicializan a 0) */
+static int g_uninitialized_var;
+static size_t g_total_runs_global;
+static atomic_size_t g_total_runs_atomic;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  ESTRUCTURAS DE DATOS
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
 typedef struct {
     uint32_t width;
     uint32_t height;
     uint8_t *data;
 } Image;
 
-/*
- * Buffer: Buffer dinámico con crecimiento amortizado.
- */
 typedef struct {
     uint8_t *data;
     size_t size;
@@ -95,59 +63,98 @@ typedef struct {
 } Buffer;
 
 /*
- * ThreadArg: Argumentos y estado para cada hilo de compresión.
+ * ThreadArg: Argumentos y estado de cada hilo de trabajo
  *
- * Cada hilo recibe un puntero a su porción de la imagen y un buffer
- * local donde escribe los datos comprimidos. El campo pixels_done es
- * una variable atómica que permite al hilo monitor leer el progreso
- * sin necesidad de mutex (patrón productor-consumidor lock-free).
- *
- * En macOS, mach_thread almacena el port Mach del hilo, necesario
- * para consultar su consumo de CPU individual mediante thread_info().
+ * Cada hilo tiene su propia instancia con:
+ *   - Puntero a su porción de la imagen (solo lectura)
+ *   - Buffer de salida propio (escritura exclusiva)
+ *   - Progreso atómico para monitoreo
+ *   - Información del sistema (TID, mach_port, stack)
  */
 typedef struct {
     /* Identificación */
-    int thread_idx;            /* Índice del hilo (0 a N-1) */
-    uint64_t system_tid;       /* TID asignado por el sistema operativo */
+    int thread_idx;
+    uint64_t system_tid;
+    void *stack_addr;           /* Dirección de una variable local en el stack del hilo */
 
-    /* Datos de entrada (solo lectura, no requiere sincronización) */
-    const uint8_t *pixels;     /* Puntero al inicio del bloque en la imagen */
-    size_t num_pixels;         /* Número de píxeles en este bloque */
-    uint32_t start_row;        /* Primera fila asignada */
-    uint32_t num_rows;         /* Número de filas asignadas */
+    /* Datos de entrada (READ-ONLY, sin copia) */
+    const uint8_t *pixels;
+    size_t num_pixels;
+    uint32_t start_row;
+    uint32_t num_rows;
+    size_t byte_offset;         /* Offset en bytes desde inicio de img.data */
 
-    /* Datos de salida (escritura exclusiva por este hilo) */
-    Buffer result;             /* Buffer con datos RLE comprimidos */
+    /* Datos de salida (escritura exclusiva) */
+    Buffer result;
 
-    /* Progreso (escritura por hilo, lectura por monitor) */
-    atomic_size_t pixels_done; /* Píxeles procesados hasta ahora */
+    /* Progreso atómico (lock-free) */
+    atomic_size_t pixels_done;
 
-    /* Métricas (escritura al finalizar) */
-    double cpu_time;           /* Tiempo CPU total consumido por este hilo */
+    /* Métricas de CPU por hilo */
+    double cpu_time_user;
+    double cpu_time_sys;
 
 #ifdef __APPLE__
-    mach_port_t mach_thread;   /* Port Mach para consultar CPU por hilo */
+    mach_port_t mach_thread;
 #endif
 } ThreadArg;
 
-/*
- * MonitorState: Estado global para el hilo monitor de visualización.
- *
- * Contiene referencias a todos los ThreadArgs para poder consultar
- * el progreso de cada hilo, más metadata de la imagen para calcular
- * porcentajes y throughput globales.
- */
-typedef struct {
-    ThreadArg *args;           /* Array de argumentos de todos los hilos */
-    int num_threads;           /* Número total de hilos de compresión */
-    size_t total_pixels;       /* Total de píxeles en la imagen */
-    size_t raw_size;           /* Tamaño original en bytes */
-    struct timespec *t_start;  /* Inicio del cronómetro */
-    atomic_int done;           /* Flag: 1 cuando todos los hilos terminaron */
-} MonitorState;
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  INFORMACIÓN DEL SISTEMA OPERATIVO
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void get_memory_info(size_t *rss, size_t *virtual_size) {
+#ifdef __APPLE__
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) == KERN_SUCCESS) {
+        *rss = info.resident_size;
+        *virtual_size = info.virtual_size;
+    } else {
+        *rss = 0;
+        *virtual_size = 0;
+    }
+#else
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f) {
+        long virt_pages, res_pages;
+        fscanf(f, "%ld %ld", &virt_pages, &res_pages);
+        fclose(f);
+        long page_size = sysconf(_SC_PAGESIZE);
+        *virtual_size = virt_pages * page_size;
+        *rss = res_pages * page_size;
+    }
+#endif
+}
+
+/* Obtener tiempo CPU de un hilo específico via Mach API */
+static void get_thread_cpu_time(ThreadArg *ta) {
+#ifdef __APPLE__
+    if (ta->mach_thread) {
+        thread_basic_info_data_t info;
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(ta->mach_thread, THREAD_BASIC_INFO,
+                        (thread_info_t)&info, &count) == KERN_SUCCESS) {
+            ta->cpu_time_user = info.user_time.seconds + info.user_time.microseconds / 1e6;
+            ta->cpu_time_sys = info.system_time.seconds + info.system_time.microseconds / 1e6;
+        }
+    }
+#else
+    ta->cpu_time_user = 0;
+    ta->cpu_time_sys = 0;
+#endif
+}
+
+static void get_process_cpu_times(double *user_s, double *sys_s) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    *user_s = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6;
+    *sys_s  = ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 2: BUFFER DINÁMICO
+ *  BUFFER DINÁMICO
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void buffer_init(Buffer *buf, size_t cap) {
@@ -168,76 +175,9 @@ static void buffer_push(Buffer *buf, const uint8_t *bytes, size_t n) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 3: MÉTRICAS DEL SISTEMA
+ *  LECTURA PPM / GENERACIÓN SINTÉTICA
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * get_rss: Memoria física (RSS) del proceso completo.
- * (Ver documentación detallada en rle_secuencial.c)
- */
-static size_t get_rss(void) {
-#ifdef __APPLE__
-    struct mach_task_basic_info info;
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                  (task_info_t)&info, &count) == KERN_SUCCESS)
-        return info.resident_size;
-    return 0;
-#else
-    FILE *f = fopen("/proc/self/statm", "r");
-    if (!f) return 0;
-    long pages;
-    if (fscanf(f, "%*d %ld", &pages) != 1) { fclose(f); return 0; }
-    fclose(f);
-    return (size_t)pages * sysconf(_SC_PAGESIZE);
-#endif
-}
-
-/*
- * get_thread_cpu: Obtiene el tiempo de CPU consumido por un hilo específico.
- *
- * @param ta  Argumento del hilo (contiene el mach port)
- * @return    Segundos de CPU (usuario + sistema) consumidos por el hilo
- *
- * En macOS: usa Mach API thread_info(THREAD_BASIC_INFO) que retorna
- * tiempos de usuario y sistema desglosados por hilo individual.
- *
- * Esto es crucial para demostrar que MÚLTIPLES hilos están consumiendo
- * CPU simultáneamente (paralelismo real, no concurrencia simulada).
- * Si la suma de CPU de todos los hilos > wall time, hay paralelismo real.
- */
-static double get_thread_cpu(ThreadArg *ta) {
-#ifdef __APPLE__
-    thread_basic_info_data_t info;
-    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
-    if (ta->mach_thread &&
-        thread_info(ta->mach_thread, THREAD_BASIC_INFO,
-                    (thread_info_t)&info, &count) == KERN_SUCCESS) {
-        return info.user_time.seconds + info.user_time.microseconds / 1e6 +
-               info.system_time.seconds + info.system_time.microseconds / 1e6;
-    }
-    return 0;
-#else
-    (void)ta;
-    return 0; /* En Linux se podría usar clock_gettime(CLOCK_THREAD_CPUTIME_ID) */
-#endif
-}
-
-/*
- * get_cpu_times: Tiempos CPU del proceso completo (todos los hilos sumados).
- */
-static void get_cpu_times(double *user_s, double *sys_s) {
-    struct rusage ru;
-    getrusage(RUSAGE_SELF, &ru);
-    *user_s = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6;
-    *sys_s  = ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 4: LECTURA DE ARCHIVOS PPM
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/* (Ver documentación detallada del formato PPM en rle_secuencial.c) */
 static int load_ppm(const char *path, Image *img) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
@@ -271,11 +211,6 @@ static int load_ppm(const char *path, Image *img) {
     return 0;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 5: GENERACIÓN DE IMAGEN SINTÉTICA
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/* (Ver documentación detallada de la generación en rle_secuencial.c) */
 static void generate_synthetic(Image *img, uint32_t w, uint32_t h) {
     img->width = w;
     img->height = h;
@@ -298,197 +233,16 @@ static void generate_synthetic(Image *img, uint32_t w, uint32_t h) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 6: VISUALIZACIÓN EN TIEMPO REAL (PARALELA)
+ *  FUNCIÓN DEL HILO DE COMPRESIÓN
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define BAR_WIDTH 25
-
-/*
- * print_bar: Barra de progreso con caracteres Unicode y colores ANSI.
- * (Ver documentación en rle_secuencial.c)
- */
-static void print_bar(double pct) {
-    int filled = (int)(pct / 100.0 * BAR_WIDTH);
-    if (filled > BAR_WIDTH) filled = BAR_WIDTH;
-    printf("\033[32m");
-    for (int i = 0; i < filled; i++) printf("█");
-    printf("\033[90m");
-    for (int i = filled; i < BAR_WIDTH; i++) printf("░");
-    printf("\033[0m");
-}
-
-/*
- * print_display: Dibuja el panel completo de métricas para la versión paralela.
- *
- * @param ms  Estado del monitor con acceso a todos los hilos
- * @return    Número de líneas impresas (para mover cursor en la próxima iteración)
- *
- * El display muestra una TABLA donde cada fila corresponde a un hilo:
- *
- *   Hilo  TID         Core  Progreso                        CPU(ms)  Filas
- *   ───── ─────────── ────  ─────────────────────────────── ──────── ─────
- *    0    0x1A3F        0   [████████████████████████████] 100%  2.1    512
- *    1    0x1A40        1   [██████████████████████░░░░░░]  78%  1.8    512
- *    ...
- *
- * Esto permite observar visualmente:
- *   - Todos los hilos progresando SIMULTÁNEAMENTE (paralelismo real)
- *   - Distribución equitativa del trabajo (filas similares por hilo)
- *   - Cada hilo consumiendo CPU de forma independiente
- *   - Uso de CPU > 100% (indica múltiples cores activos)
- */
-static int print_display(MonitorState *ms) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    double elapsed = (now.tv_sec - ms->t_start->tv_sec) +
-                     (now.tv_nsec - ms->t_start->tv_nsec) / 1e9;
-
-    int lines = 0;
-
-    /* ─── Header del recuadro ─── */
-    printf("\033[36m╔═══════════════════════════════════════════════════════════════════════════════╗\033[0m\n"); lines++;
-    printf("\033[36m║\033[0m   \033[1;33mCOMPRESIÓN RLE — MODO PARALELO (%d hilos)\033[0m", ms->num_threads);
-    int title_len = 37 + (ms->num_threads >= 10 ? 2 : 1);
-    for (int i = title_len; i < 76; i++) printf(" ");
-    printf("\033[36m║\033[0m\n"); lines++;
-    printf("\033[36m╠═══════════════════════════════════════════════════════════════════════════════╣\033[0m\n"); lines++;
-    printf("\033[36m║\033[0m  Datos originales: \033[1m%zu\033[0m bytes (%zu píxeles)",
-           ms->raw_size, ms->total_pixels);
-    printf("                          \033[36m║\033[0m\n"); lines++;
-    printf("\033[36m╠═══════════════════════════════════════════════════════════════════════════════╣\033[0m\n"); lines++;
-
-    /* ─── Cabecera de la tabla de hilos ─── */
-    printf("\033[36m║\033[0m \033[1;37m Hilo  TID         Core  Progreso                        CPU(ms)  Filas \033[0m\033[36m║\033[0m\n"); lines++;
-    printf("\033[36m║\033[0m ───── ─────────── ────  ─────────────────────────────── ──────── ───── \033[36m║\033[0m\n"); lines++;
-
-    /* ─── Fila por cada hilo de compresión ─── */
-    size_t total_done = 0;
-    size_t total_comp = 0;
-
-    for (int i = 0; i < ms->num_threads; i++) {
-        ThreadArg *ta = &ms->args[i];
-        size_t done = atomic_load(&ta->pixels_done);
-        total_done += done;
-        total_comp += ta->result.size;
-
-        /* Calcular progreso individual */
-        double pct = ta->num_pixels > 0
-                     ? (double)done / ta->num_pixels * 100.0 : 0;
-        if (pct > 100.0) pct = 100.0;
-
-        /* Obtener CPU individual de este hilo */
-        double cpu_ms = get_thread_cpu(ta) * 1000.0;
-
-        printf("\033[36m║\033[0m  %2d   0x%-8lx   %2d   ",
-               i, (unsigned long)ta->system_tid, i);
-        print_bar(pct);
-        printf(" %5.1f%%  %6.1f  %5u \033[36m║\033[0m\n",
-               pct, cpu_ms, ta->num_rows);
-        lines++;
-    }
-
-    /* ─── Métricas globales ─── */
-    printf("\033[36m╠═══════════════════════════════════════════════════════════════════════════════╣\033[0m\n"); lines++;
-
-    double global_pct = ms->total_pixels > 0
-                        ? (double)total_done / ms->total_pixels * 100.0 : 0;
-    if (global_pct > 100.0) global_pct = 100.0;
-
-    double user_t, sys_t;
-    get_cpu_times(&user_t, &sys_t);
-    double cpu_total = user_t + sys_t;
-
-    /*
-     * Uso de CPU > 100% es la PRUEBA de paralelismo real.
-     * Si hay N cores activos, el uso teórico máximo es N × 100%.
-     * Ejemplo: 8 hilos en 8 cores → hasta 800% de uso de CPU.
-     */
-    double cpu_pct = elapsed > 0.001 ? cpu_total / elapsed * 100.0 : 0;
-    size_t rss = get_rss();
-    double throughput = elapsed > 0.001
-                        ? (total_done * 3.0 / (1024.0 * 1024.0)) / elapsed : 0;
-
-    printf("\033[36m║\033[0m  Progreso global: ");
-    print_bar(global_pct);
-    printf(" \033[1m%5.1f%%\033[0m                      \033[36m║\033[0m\n", global_pct); lines++;
-    printf("\033[36m║\033[0m                                                                             \033[36m║\033[0m\n"); lines++;
-    printf("\033[36m║\033[0m  Tiempo transcurrido:  \033[1m%8.6f\033[0m s        Uso CPU: \033[1m%6.1f%%\033[0m               \033[36m║\033[0m\n",
-           elapsed, cpu_pct); lines++;
-    printf("\033[36m║\033[0m  CPU total (usr+sys):  \033[1m%8.6f\033[0m s        Memoria: \033[1m%5.1f\033[0m MB               \033[36m║\033[0m\n",
-           cpu_total, rss / (1024.0 * 1024.0)); lines++;
-    printf("\033[36m║\033[0m  Throughput:           \033[1m%7.1f\033[0m MB/s      Comprimido: \033[1m%zu\033[0m bytes       \033[36m║\033[0m\n",
-           throughput, total_comp); lines++;
-    printf("\033[36m╚═══════════════════════════════════════════════════════════════════════════════╝\033[0m\n"); lines++;
-
-    return lines;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 7: HILO MONITOR
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/*
- * monitor_func: Hilo auxiliar que refresca la visualización cada 80ms.
- *
- * Patrón de actualización en terminal:
- *   1. Imprimir el display completo (N líneas)
- *   2. Esperar 80ms
- *   3. Mover cursor arriba N líneas con \033[NA
- *   4. Sobreescribir con datos actualizados
- *
- * El número de líneas varía con el número de hilos, por lo que
- * print_display() retorna el conteo para el cursor.
- */
-static void *monitor_func(void *arg) {
-    MonitorState *ms = (MonitorState *)arg;
-    int prev_lines = 0;
-
-    while (!atomic_load(&ms->done)) {
-        if (prev_lines > 0)
-            printf("\033[%dA", prev_lines);
-        prev_lines = print_display(ms);
-        fflush(stdout);
-        usleep(80000);
-    }
-
-    /* Refresco final con datos completos */
-    if (prev_lines > 0) printf("\033[%dA", prev_lines);
-    print_display(ms);
-    fflush(stdout);
-    return NULL;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 8: HILO DE COMPRESIÓN RLE
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/*
- * rle_thread_func: Función ejecutada por cada hilo de compresión.
- *
- * @param arg  Puntero a ThreadArg con los datos del bloque asignado
- * @return     NULL (resultado en ta->result)
- *
- * Flujo de ejecución:
- *   1. Registrar TID del sistema y mach port (para métricas)
- *   2. Inicializar buffer de salida local
- *   3. Ejecutar RLE sobre el bloque de píxeles asignado
- *   4. Actualizar progreso atómico después de cada run
- *   5. Registrar tiempo CPU final
- *
- * INDEPENDENCIA: Cada hilo trabaja sobre una porción DISJUNTA de la
- * imagen, con su propio buffer de salida. No hay escrituras compartidas
- * durante la compresión, lo que elimina:
- *   - Condiciones de carrera
- *   - Necesidad de mutex o semáforos
- *   - False sharing (los buffers están en distintas regiones de heap)
- *
- * La única sincronización es la variable atómica pixels_done que se
- * actualiza al final de cada run (operación lock-free de ~1 nanosegundo).
- */
 static void *rle_thread_func(void *arg) {
     ThreadArg *ta = (ThreadArg *)arg;
 
-    /* ─── Registrar identificadores del hilo ─── */
+    /* Capturar información del hilo */
+    int stack_var = 0;  /* Variable local para obtener dirección del stack */
+    ta->stack_addr = &stack_var;
+
 #ifdef __APPLE__
     uint64_t tid;
     pthread_threadid_np(NULL, &tid);
@@ -498,14 +252,14 @@ static void *rle_thread_func(void *arg) {
     ta->system_tid = (uint64_t)pthread_self();
 #endif
 
-    /* ─── Inicializar buffer de salida local ─── */
+    /* Inicializar buffer de salida */
     buffer_init(&ta->result, ta->num_pixels * 3 / 2 + 256);
 
+    /* Compresión RLE */
     const uint8_t *pixels = ta->pixels;
     size_t num_pixels = ta->num_pixels;
     size_t i = 0;
 
-    /* ─── Algoritmo RLE (idéntico al secuencial) ─── */
     while (i < num_pixels) {
         uint8_t r = pixels[i * 3];
         uint8_t g = pixels[i * 3 + 1];
@@ -522,71 +276,388 @@ static void *rle_thread_func(void *arg) {
         uint8_t run[4] = { count, r, g, b };
         buffer_push(&ta->result, run, 4);
         i += count;
-
-        /* Actualizar progreso atómico (lock-free) */
         atomic_store(&ta->pixels_done, i);
+        atomic_fetch_add(&g_total_runs_atomic, 1);  /* Contador global atómico */
     }
 
-    /* ─── Registrar CPU time al finalizar ─── */
-    ta->cpu_time = get_thread_cpu(ta);
+    /* Capturar tiempo CPU final */
+    get_thread_cpu_time(ta);
     return NULL;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SECCIÓN 9: FUNCIÓN PRINCIPAL
+ *  DECLARACIONES ADELANTADAS (para mostrar direcciones de código)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+int main(int argc, char *argv[]);
+static void *rle_thread_func(void *arg);
+static void buffer_init(Buffer *buf, size_t cap);
+static void buffer_push(Buffer *buf, const uint8_t *bytes, size_t n);
+static void generate_synthetic(Image *img, uint32_t w, uint32_t h);
+static int load_ppm(const char *path, Image *img);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  VISUALIZACIÓN DE SEGMENTOS DE MEMORIA (PILA, CÓDIGO, DATOS)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_memory_segments(Image *img, ThreadArg *args, int num_threads,
+                                   void *stack_main_top, void *stack_main_bottom) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *MAGENTA = "\033[35m";
+    const char *WHITE = "\033[1;37m";
+    const char *RESET = "\033[0m";
+
+    size_t rss, virt;
+    get_memory_info(&rss, &virt);
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %s██████╗ ██╗██╗      █████╗      SEGMENTOS DE MEMORIA DEL PROCESO%s                %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s     %s██╔══██╗██║██║     ██╔══██╗     (Pila, Código, Datos)%s                           %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s     %s██████╔╝██║██║     ███████║%s                                                     %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s     %s██╔═══╝ ██║██║     ██╔══██║     MODO: PARALELO (%d hilos)%s                        %s║%s\n", CYAN, RESET, YELLOW, num_threads, RESET, CYAN, RESET);
+    printf("%s║%s     %s██║     ██║███████╗██║  ██║%s                                                     %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s     %s╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝%s                                                     %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+
+    /* ═══════════════════════════════════════════════════════════════════════
+     *  SEGMENTO: PILA (STACK) - Múltiples stacks para threads
+     * ═══════════════════════════════════════════════════════════════════════ */
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s█ SEGMENTO: PILA (STACK) - MÚLTIPLES STACKS%s                                    %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  Descripción: Cada pthread tiene su PROPIO stack independiente.                %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s               El hilo principal usa el stack del proceso.                      %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s               Los hilos worker tienen stacks de 512 KB cada uno.               %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  Permisos: %sRW- (lectura/escritura, no ejecutable)%s                             %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s┌─ STACK HILO PRINCIPAL (main thread) ────────────────────────────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  stack_top (local)      %s0x%014lx%s    8 bytes   (tope pila main)  │ %s▓%s  %s║%s\n",
+           CYAN, RESET, RED, RESET, MAGENTA, (unsigned long)stack_main_top, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  stack_bottom (local)   %s0x%014lx%s    8 bytes   (base pila main)  │ %s▓%s  %s║%s\n",
+           CYAN, RESET, RED, RESET, MAGENTA, (unsigned long)stack_main_bottom, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  Tamaño stack main:     ~%lu bytes                                        │ %s▓%s  %s║%s\n",
+           CYAN, RESET, RED, RESET, (unsigned long)((char*)stack_main_top - (char*)stack_main_bottom), RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s┌─ STACKS HILOS WORKER (pthread_create) ─────────────────────────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  %sHilo   TID            Stack Addr        Tamaño      Estado%s           │ %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  ────   ────────────   ────────────────  ──────────  ─────────────      │ %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+
+    for (int i = 0; i < num_threads && i < 8; i++) {
+        const char *estado = args[i].stack_addr ? "Activo" : "Pendiente";
+        printf("%s║%s  %s▓%s  │  %s[%d]%s    0x%-10lx   %s0x%012lx%s    512 KB      %s%-14s%s │ %s▓%s  %s║%s\n",
+               CYAN, RESET, RED, RESET, GREEN, i, RESET,
+               (unsigned long)args[i].system_tid,
+               MAGENTA, args[i].stack_addr ? (unsigned long)args[i].stack_addr : 0, RESET,
+               args[i].stack_addr ? GREEN : YELLOW, estado, RESET,
+               RED, RESET, CYAN, RESET);
+    }
+
+    printf("%s║%s  %s▓%s  │                                                                         │ %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  Total stacks: %s1 main + %d workers = %.1f MB%s                               │ %s▓%s  %s║%s\n",
+           CYAN, RESET, RED, RESET, GREEN, num_threads, (8.0 + num_threads * 0.5), RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, RED, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+
+    /* ═══════════════════════════════════════════════════════════════════════
+     *  SEGMENTO: CÓDIGO (TEXT)
+     * ═══════════════════════════════════════════════════════════════════════ */
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s█ SEGMENTO: CÓDIGO (TEXT)%s                                                     %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, WHITE, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  Descripción: Contiene las instrucciones de máquina del programa.             %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s               COMPARTIDO entre TODOS los hilos (read-only).                   %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s               Cada hilo ejecuta rle_thread_func() desde el mismo código.      %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  Permisos: %sR-X (lectura/ejecución, no escritura)%s                              %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, GREEN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s┌─────────────────────────────────────────────────────────────────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, WHITE, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  %sFunción                 Dirección           Descripción%s              │ %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, WHITE, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  ──────────────────────  ──────────────────  ─────────────────────────  │ %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  main()                 %s0x%014lx%s  Punto de entrada           │ %s▓%s  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, MAGENTA, (unsigned long)main, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  %srle_thread_func()%s      %s0x%014lx%s  %s*** EJECUTADA POR HILOS%s    │ %s▓%s  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, RED, RESET, MAGENTA, (unsigned long)rle_thread_func, RESET, RED, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  buffer_init()          %s0x%014lx%s  Inicializar buffer         │ %s▓%s  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, MAGENTA, (unsigned long)buffer_init, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  buffer_push()          %s0x%014lx%s  Agregar a buffer           │ %s▓%s  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, MAGENTA, (unsigned long)buffer_push, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  generate_synthetic()   %s0x%014lx%s  Generar imagen             │ %s▓%s  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, MAGENTA, (unsigned long)generate_synthetic, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  load_ppm()             %s0x%014lx%s  Cargar PPM                 │ %s▓%s  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, MAGENTA, (unsigned long)load_ppm, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, WHITE, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+
+    /* ═══════════════════════════════════════════════════════════════════════
+     *  SEGMENTO: DATOS (DATA + BSS + HEAP)
+     * ═══════════════════════════════════════════════════════════════════════ */
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s█ SEGMENTO: DATOS (DATA + BSS + HEAP)%s                                         %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s[DATA]%s Variables globales inicializadas (COMPARTIDAS, read-only)             %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s[BSS]%s  Variables globales no inicializadas (pueden requerir mutex)           %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s[HEAP]%s Imagen COMPARTIDA + buffers PRIVADOS por hilo                         %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  Permisos: %sRW- (lectura/escritura, no ejecutable)%s                             %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+
+    /* DATA segment */
+    printf("%s║%s  %s▓%s  %s┌─ DATA (variables inicializadas) ────────────────────────────────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  g_initialized_var      %s0x%014lx%s    4 bytes   valor: %d       │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)&g_initialized_var, RESET, g_initialized_var, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  g_program_name         %s0x%014lx%s    8 bytes   \"%s\"    │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)&g_program_name, RESET, g_program_name, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  g_num_threads_config   %s0x%014lx%s    4 bytes   valor: %d        │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)&g_num_threads_config, RESET, g_num_threads_config, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+
+    /* BSS segment */
+    printf("%s║%s  %s▓%s  %s┌─ BSS (variables no inicializadas) ─────────────────────────────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  g_uninitialized_var    %s0x%014lx%s    4 bytes   valor: %d        │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)&g_uninitialized_var, RESET, g_uninitialized_var, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  g_total_runs_global    %s0x%014lx%s    8 bytes   valor: %zu     │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)&g_total_runs_global, RESET, g_total_runs_global, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  g_total_runs_atomic    %s0x%014lx%s    8 bytes   %s(atómico)%s        │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)&g_total_runs_atomic, RESET, RED, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+
+    /* HEAP segment - shared image */
+    printf("%s║%s  %s▓%s  %s┌─ HEAP - IMAGEN COMPARTIDA (todos los hilos LEEN de aquí) ────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  img.data               %s0x%014lx%s  %10zu bytes           │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)img->data, RESET,
+           (size_t)img->width * img->height * 3, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  Imagen:                %u x %u píxeles (RGB)                         │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, img->width, img->height, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  %s*** LECTURA COMPARTIDA - Sin mutex necesario (read-only)%s              │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, RED, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+
+    /* HEAP segment - per-thread buffers */
+    printf("%s║%s  %s▓%s  %s┌─ HEAP - BUFFERS POR HILO (cada hilo ESCRIBE a su propio buffer) ────┐%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  %sHilo  Buffer Addr       Capacidad     Usado        Estado%s         │ %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  ────  ────────────────   ───────────   ───────────   ──────────     │ %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+
+    size_t total_heap_buffers = 0;
+    for (int i = 0; i < num_threads && i < 8; i++) {
+        void *buf_addr = args[i].result.data;
+        size_t cap = args[i].result.capacity;
+        size_t used = args[i].result.size;
+        total_heap_buffers += cap;
+
+        const char *estado = buf_addr ? "Asignado" : "Pendiente";
+        printf("%s║%s  %s▓%s  │  %s[%d]%s   %s0x%012lx%s   %10zu B   %10zu B   %s%-10s%s     │ %s▓%s  %s║%s\n",
+               CYAN, RESET, GREEN, RESET, GREEN, i, RESET,
+               MAGENTA, buf_addr ? (unsigned long)buf_addr : 0, RESET,
+               cap, used,
+               buf_addr ? GREEN : YELLOW, estado, RESET,
+               GREEN, RESET, CYAN, RESET);
+    }
+
+    printf("%s║%s  %s▓%s  │                                                                         │ %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  %s*** ESCRITURA PRIVADA - Sin mutex (cada hilo a su buffer)%s             │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, RED, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  │  Total buffers: %s%.2f MB%s                                                  │ %s▓%s  %s║%s\n",
+           CYAN, RESET, GREEN, RESET, GREEN, total_heap_buffers / (1024.0 * 1024.0), RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+
+    /* Resumen */
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ RESUMEN DE MEMORIA DEL PROCESO ───────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  Memoria Física (RSS):    %s%10.2f MB%s                                         │  %s║%s\n",
+           CYAN, RESET, GREEN, rss / (1024.0 * 1024.0), RESET, CYAN, RESET);
+    printf("%s║%s  │  Memoria Virtual:         %s%10.2f MB%s                                         │  %s║%s\n",
+           CYAN, RESET, GREEN, virt / (1024.0 * 1024.0), RESET, CYAN, RESET);
+    printf("%s║%s  │  PID:                     %s%10d%s                                              │  %s║%s\n",
+           CYAN, RESET, GREEN, getpid(), RESET, CYAN, RESET);
+    printf("%s║%s  │  Hilos totales:           %s%10d%s  (1 main + %d workers)                       │  %s║%s\n",
+           CYAN, RESET, RED, num_threads + 1, RESET, num_threads, CYAN, RESET);
+    printf("%s║%s  │  Cores disponibles:       %s%10d%s                                              │  %s║%s\n",
+           CYAN, RESET, GREEN, (int)sysconf(_SC_NPROCESSORS_ONLN), RESET, CYAN, RESET);
+    printf("%s║%s  %s└───────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+static void print_thread_distribution(ThreadArg *args, int num_threads, Image *img, const char *phase) {
+    const char *CYAN = "\033[36m";
+    const char *WHITE = "\033[1;37m";
+    const char *GREEN = "\033[32m";
+    const char *YELLOW = "\033[33m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+
+    printf("%s║%s  %s┌─ DISTRIBUCIÓN DE TRABAJO (%d HILOS) - %s ───────────────────────────┐%s  %s║%s\n",
+           CYAN, RESET, WHITE, num_threads, phase, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sHilo  TID         Core  Filas       Píxeles     Stack Addr     Bytes%s   │  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ────  ──────────  ────  ──────────  ──────────  ────────────   ───────   │  %s║%s\n",
+           CYAN, RESET, CYAN, RESET);
+
+    for (int i = 0; i < num_threads; i++) {
+        ThreadArg *ta = &args[i];
+
+        printf("%s║%s  │  %s%4d%s  0x%-8lx  %s%4d%s  %4u-%-5u  %s%-10zu%s  %s0x%08lx%s   %s%-7zu%s   │  %s║%s\n",
+               CYAN, RESET,
+               GREEN, i, RESET,
+               (unsigned long)ta->system_tid,
+               YELLOW, i, RESET,
+               ta->start_row, ta->start_row + ta->num_rows - 1,
+               GREEN, ta->num_pixels, RESET,
+               MAGENTA, ta->stack_addr ? (unsigned long)ta->stack_addr : 0, RESET,
+               GREEN, ta->num_pixels * 3, RESET,
+               CYAN, RESET);
+    }
+
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sTotal: %u filas, %zu píxeles, %zu bytes de entrada%s                     │  %s║%s\n",
+           CYAN, RESET, WHITE, img->height, (size_t)img->width * img->height,
+           (size_t)img->width * img->height * 3, RESET, CYAN, RESET);
+    printf("%s║%s  └──────────────────────────────────────────────────────────────────────────┘  %s║%s\n", CYAN, RESET, CYAN, RESET);
+}
+
+static void print_thread_results(ThreadArg *args, int num_threads) {
+    const char *CYAN = "\033[36m";
+    const char *WHITE = "\033[1;37m";
+    const char *GREEN = "\033[32m";
+    const char *YELLOW = "\033[33m";
+    const char *RESET = "\033[0m";
+
+    printf("%s║%s  %s┌─ TIEMPO CPU POR HILO (via Mach thread_info) ──────────────────────────────┐%s  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sHilo   TID         user_time    sys_time    CPU total    Comprimido%s    │  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ────   ──────────  ──────────   ─────────   ──────────   ──────────     │  %s║%s\n",
+           CYAN, RESET, CYAN, RESET);
+
+    double total_cpu = 0;
+    size_t total_compressed = 0;
+
+    for (int i = 0; i < num_threads; i++) {
+        ThreadArg *ta = &args[i];
+        double cpu_total = ta->cpu_time_user + ta->cpu_time_sys;
+        total_cpu += cpu_total;
+        total_compressed += ta->result.size;
+
+        printf("%s║%s  │  %s%4d%s   0x%-8lx  %s%8.4f ms%s  %s%7.4f ms%s  %s%8.4f ms%s  %s%10zu B%s    │  %s║%s\n",
+               CYAN, RESET,
+               GREEN, i, RESET,
+               (unsigned long)ta->system_tid,
+               YELLOW, ta->cpu_time_user * 1000, RESET,
+               YELLOW, ta->cpu_time_sys * 1000, RESET,
+               GREEN, cpu_total * 1000, RESET,
+               GREEN, ta->result.size, RESET,
+               CYAN, RESET);
+    }
+
+    printf("%s║%s  │  ────────────────────────────────────────────────────────────────────    │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sSUMA                                     %8.4f ms  %10zu B%s    │  %s║%s\n",
+           CYAN, RESET, WHITE, total_cpu * 1000, total_compressed, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  └──────────────────────────────────────────────────────────────────────────┘  %s║%s\n", CYAN, RESET, CYAN, RESET);
+}
+
+static void print_execution_metrics(double elapsed, double user_t, double sys_t,
+                                    double total_thread_cpu,
+                                    size_t compressed_size, size_t raw_size,
+                                    int num_threads) {
+    const char *CYAN = "\033[36m";
+    const char *WHITE = "\033[1;37m";
+    const char *GREEN = "\033[32m";
+    const char *YELLOW = "\033[33m";
+    const char *RED = "\033[31m";
+    const char *RESET = "\033[0m";
+
+    double cpu_total = user_t + sys_t;
+    double speedup = elapsed > 0 ? total_thread_cpu / elapsed : 0;
+    double efficiency = (speedup / num_threads) * 100.0;
+    double cpu_pct = elapsed > 0 ? (cpu_total / elapsed) * 100.0 : 0;
+    double ratio = (1.0 - (double)compressed_size / raw_size) * 100.0;
+    double throughput = elapsed > 0 ? (raw_size / (1024.0 * 1024.0)) / elapsed : 0;
+
+    printf("%s║%s  %s┌─ MÉTRICAS DE EJECUCIÓN ────────────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sTIEMPOS:%s                                                                 │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    Wall time (real):      %s%10.6f%s segundos                            │  %s║%s\n",
+           CYAN, RESET, GREEN, elapsed, RESET, CYAN, RESET);
+    printf("%s║%s  │    CPU time proceso:      %s%10.6f%s segundos (usr+sys via getrusage)   │  %s║%s\n",
+           CYAN, RESET, YELLOW, cpu_total, RESET, CYAN, RESET);
+    printf("%s║%s  │    CPU time hilos:        %s%10.6f%s segundos (suma de thread_info)     │  %s║%s\n",
+           CYAN, RESET, YELLOW, total_thread_cpu, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sPARALELISMO:%s                                                            │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    Speedup (CPU/Wall):    %s%10.2fx%s  (%.1f ms / %.1f ms)               │  %s║%s\n",
+           CYAN, RESET, RED, speedup, RESET, total_thread_cpu * 1000, elapsed * 1000, CYAN, RESET);
+    printf("%s║%s  │    Eficiencia:            %s%10.1f%%%s  (Speedup / %d cores)               │  %s║%s\n",
+           CYAN, RESET, GREEN, efficiency, RESET, num_threads, CYAN, RESET);
+    printf("%s║%s  │    Uso de CPU:            %s%10.1f%%%s  (>100%% = múltiples cores)         │  %s║%s\n",
+           CYAN, RESET, GREEN, cpu_pct, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sRENDIMIENTO:%s                                                            │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    Throughput:            %s%10.1f%s MB/s                                 │  %s║%s\n",
+           CYAN, RESET, GREEN, throughput, RESET, CYAN, RESET);
+    printf("%s║%s  │    Tamaño original:       %s%10zu%s bytes                                │  %s║%s\n",
+           CYAN, RESET, YELLOW, raw_size, RESET, CYAN, RESET);
+    printf("%s║%s  │    Tamaño comprimido:     %s%10zu%s bytes                                │  %s║%s\n",
+           CYAN, RESET, GREEN, compressed_size, RESET, CYAN, RESET);
+    printf("%s║%s  │    Ratio de compresión:   %s%10.1f%%%s                                    │  %s║%s\n",
+           CYAN, RESET, GREEN, ratio, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  └──────────────────────────────────────────────────────────────────────────┘  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  FUNCIÓN PRINCIPAL
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 int main(int argc, char *argv[]) {
+    /* Variables en STACK - marcadores */
+    int stack_marker_top = 0;
     Image img;
 
-    /* ─── Cargar o generar imagen ─── */
+    /* Inicializar variable atómica global */
+    atomic_init(&g_total_runs_atomic, 0);
+
+    /* Cargar o generar imagen */
     if (argc >= 2) {
-        printf("Cargando imagen PPM: %s\n", argv[1]);
         if (load_ppm(argv[1], &img) != 0) {
             fprintf(stderr, "Error: no se pudo leer '%s' como PPM P6\n", argv[1]);
             return 1;
         }
     } else {
-        printf("Generando imagen sintética 4096x4096...\n");
         generate_synthetic(&img, 4096, 4096);
     }
 
     size_t total_pixels = (size_t)img.width * img.height;
     size_t raw_size = total_pixels * 3;
 
-    /* ─── Detectar número de cores disponibles ─── */
-    /*
-     * sysconf(_SC_NPROCESSORS_ONLN) retorna el número de procesadores
-     * lógicos actualmente disponibles (online). En un CPU con
-     * hyperthreading, esto incluye los hilos lógicos de cada core.
-     *
-     * Creamos exactamente un hilo por core para maximizar el paralelismo
-     * sin overhead de context switching excesivo.
-     */
+    /* Detectar número de cores */
     int num_threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
     if (num_threads < 1) num_threads = 1;
     if ((size_t)num_threads > img.height) num_threads = (int)img.height;
 
-    char outpath[512];
-    if (argc >= 2)
-        snprintf(outpath, sizeof(outpath), "%s.rle", argv[1]);
-    else
-        snprintf(outpath, sizeof(outpath), "output_paralelo.rle");
+    int stack_marker_bottom = 0;  /* Marcador base de pila */
 
-    /* ─── Preparar argumentos de cada hilo ─── */
-    /*
-     * División del trabajo: las filas se reparten equitativamente.
-     * Si height no es divisible por num_threads, los primeros hilos
-     * reciben una fila extra (distribución round-robin del residuo).
-     *
-     * Ejemplo con height=4096, threads=8:
-     *   Cada hilo: 512 filas × 4096 cols = 2,097,152 píxeles
-     *   Memoria por bloque de entrada: ~6 MB (read-only, sin copia)
-     */
+    /* Preparar argumentos para cada hilo */
     pthread_t *threads = malloc(sizeof(pthread_t) * num_threads);
     ThreadArg *args = calloc(num_threads, sizeof(ThreadArg));
     if (!threads || !args) { perror("malloc"); return 1; }
 
+    /* Distribuir filas equitativamente */
     uint32_t rows_per = img.height / num_threads;
     uint32_t extra = img.height % num_threads;
     uint32_t row_off = 0;
@@ -598,44 +669,28 @@ int main(int argc, char *argv[]) {
         args[i].num_pixels = (size_t)rows * img.width;
         args[i].start_row = row_off;
         args[i].num_rows = rows;
+        args[i].byte_offset = (size_t)row_off * img.width * 3;
         atomic_init(&args[i].pixels_done, 0);
-        args[i].cpu_time = 0;
         args[i].system_tid = 0;
+        args[i].stack_addr = NULL;
+        args[i].cpu_time_user = 0;
+        args[i].cpu_time_sys = 0;
 #ifdef __APPLE__
         args[i].mach_thread = 0;
 #endif
         row_off += rows;
     }
 
-    /* ─── Configurar estado del monitor ─── */
-    MonitorState ms;
-    ms.args = args;
-    ms.num_threads = num_threads;
-    ms.total_pixels = total_pixels;
-    ms.raw_size = raw_size;
-    atomic_init(&ms.done, 0);
+    /* Mostrar segmentos de memoria ANTES de crear los hilos */
+    print_memory_segments(&img, args, num_threads, &stack_marker_top, &stack_marker_bottom);
 
-    printf("\n");
+    printf("\n\033[33m  Creando %d hilos de trabajo...\033[0m\n", num_threads);
 
-    /* ─── Iniciar cronómetro ─── */
-    struct timespec t_start;
+    /* Medir tiempo */
+    struct timespec t_start, t_end;
     clock_gettime(CLOCK_MONOTONIC, &t_start);
-    ms.t_start = &t_start;
 
-    /* ─── Lanzar hilo monitor ─── */
-    pthread_t mon_tid;
-    pthread_create(&mon_tid, NULL, monitor_func, &ms);
-
-    /* ─── Crear hilos de compresión ─── */
-    /*
-     * Cada hilo se crea con pthread_create y se le aplica una política
-     * de afinidad (en macOS) para sugerir al scheduler que lo ejecute
-     * en un core diferente.
-     *
-     * THREAD_AFFINITY_POLICY con tags diferentes indica al kernel macOS
-     * que los hilos deberían estar en cores DISTINTOS. El kernel trata
-     * esto como una "sugerencia" (hint), no como un mandato.
-     */
+    /* Crear hilos de trabajo */
     for (int i = 0; i < num_threads; i++) {
         if (pthread_create(&threads[i], NULL, rle_thread_func, &args[i]) != 0) {
             perror("pthread_create");
@@ -643,14 +698,10 @@ int main(int argc, char *argv[]) {
         }
 
 #ifdef __APPLE__
-        /* Esperar brevemente a que el hilo registre su mach_thread */
-        usleep(100);
+        /* Esperar a que el hilo registre su info */
+        usleep(1000);
         if (args[i].mach_thread) {
-            /*
-             * Tag de afinidad: hilos con tags diferentes serán
-             * programados en cores diferentes por el scheduler.
-             * Tag 0 se reserva ("no preference"), usamos i+1.
-             */
+            /* Configurar afinidad: tags diferentes -> cores diferentes */
             thread_affinity_policy_data_t policy = { i + 1 };
             thread_policy_set(args[i].mach_thread,
                               THREAD_AFFINITY_POLICY,
@@ -660,96 +711,61 @@ int main(int argc, char *argv[]) {
 #endif
     }
 
-    /* ─── Esperar a que todos los hilos terminen (barrier implícito) ─── */
-    /*
-     * pthread_join bloquea hasta que el hilo objetivo termine.
-     * Al hacer join de todos los hilos, garantizamos que toda la
-     * compresión terminó antes de comenzar la fase de merge.
-     */
+    /* Esperar a que todos terminen */
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
 
-    /* ─── Detener cronómetro ─── */
-    struct timespec t_end;
     clock_gettime(CLOCK_MONOTONIC, &t_end);
-
-    /* ─── Señalar fin al monitor y esperarlo ─── */
-    atomic_store(&ms.done, 1);
-    pthread_join(mon_tid, NULL);
-
     double elapsed = (t_end.tv_sec - t_start.tv_sec) +
                      (t_end.tv_nsec - t_start.tv_nsec) / 1e9;
 
-    /* ─── Fase de merge: concatenar resultados de todos los hilos ─── */
-    /*
-     * Los hilos comprimieron bloques de filas consecutivas. Para mantener
-     * la coherencia del archivo .rle, los buffers se concatenan EN ORDEN
-     * (hilo 0, hilo 1, ..., hilo N-1). Esto produce un archivo idéntico
-     * al que generaría la versión secuencial.
-     */
-    size_t total_compressed = 0;
-    for (int i = 0; i < num_threads; i++)
-        total_compressed += args[i].result.size;
-
-    FILE *fout = fopen(outpath, "wb");
-    if (!fout) { perror("fopen"); return 1; }
-    uint32_t header[2] = { img.width, img.height };
-    fwrite(header, sizeof(uint32_t), 2, fout);
-    for (int i = 0; i < num_threads; i++)
-        fwrite(args[i].result.data, 1, args[i].result.size, fout);
-    fclose(fout);
-
-    /* ─── Calcular métricas finales ─── */
-    size_t file_size = sizeof(uint32_t) * 2 + total_compressed;
-    double ratio = (1.0 - (double)file_size / raw_size) * 100.0;
+    /* Calcular métricas */
     double user_t, sys_t;
-    get_cpu_times(&user_t, &sys_t);
-    double cpu_total = user_t + sys_t;
+    get_process_cpu_times(&user_t, &sys_t);
 
-    /*
-     * SPEEDUP: razón entre CPU total y wall time.
-     * - Speedup = 1.0 → sin paralelismo (secuencial)
-     * - Speedup = N   → paralelismo perfecto con N cores
-     * - Speedup < N   → overhead de creación de hilos, sincronización, etc.
-     *
-     * También se puede calcular como T_secuencial / T_paralelo,
-     * pero usar CPU/wall es más directo y no requiere ejecutar ambas versiones.
-     */
-    double speedup = elapsed > 0 ? cpu_total / elapsed : 0;
-
-    /* ─── Resumen final detallado ─── */
-    printf("\n");
-    printf("\033[1;36m┌─── RESUMEN FINAL ──────────────────────────────────────────────────────────┐\033[0m\n");
-    printf("\033[1;36m│\033[0m  Imagen:             \033[1m%u x %u\033[0m (%zu bytes)                             \033[1;36m│\033[0m\n",
-           img.width, img.height, raw_size);
-    printf("\033[1;36m│\033[0m  Tamaño comprimido:  \033[1;32m%zu\033[0m bytes                                           \033[1;36m│\033[0m\n", file_size);
-    printf("\033[1;36m│\033[0m  Ratio compresión:   \033[1;32m%.1f%%\033[0m                                                 \033[1;36m│\033[0m\n", ratio);
-    printf("\033[1;36m│\033[0m  Archivo de salida:  \033[1m%-30s\033[0m                          \033[1;36m│\033[0m\n", outpath);
-    printf("\033[1;36m│\033[0m                                                                              \033[1;36m│\033[0m\n");
-    printf("\033[1;36m│\033[0m  Tiempo total:       \033[1;33m%.6f\033[0m s                                          \033[1;36m│\033[0m\n", elapsed);
-    printf("\033[1;36m│\033[0m  CPU total (usr):    %.6f s                                          \033[1;36m│\033[0m\n", user_t);
-    printf("\033[1;36m│\033[0m  CPU total (sys):    %.6f s                                          \033[1;36m│\033[0m\n", sys_t);
-    printf("\033[1;36m│\033[0m  Speedup CPU:        \033[1;33m%.2fx\033[0m (CPU time / wall time)                         \033[1;36m│\033[0m\n", speedup);
-    printf("\033[1;36m│\033[0m  Hilos utilizados:   \033[1m%d\033[0m                                                   \033[1;36m│\033[0m\n", num_threads);
-    printf("\033[1;36m│\033[0m                                                                              \033[1;36m│\033[0m\n");
-
-    /* ─── Tabla de detalle por hilo ─── */
-    printf("\033[1;36m│\033[0m  \033[1mDetalle por hilo:\033[0m                                                         \033[1;36m│\033[0m\n");
-    printf("\033[1;36m│\033[0m  Hilo  TID         Core  Filas      Píxeles      CPU(ms)   Comprimido     \033[1;36m│\033[0m\n");
-    printf("\033[1;36m│\033[0m  ───── ─────────── ────  ─────      ──────────   ────────  ────────────   \033[1;36m│\033[0m\n");
-
+    double total_thread_cpu = 0;
+    size_t total_compressed = 0;
     for (int i = 0; i < num_threads; i++) {
-        ThreadArg *ta = &args[i];
-        printf("\033[1;36m│\033[0m   %2d   0x%-8lx   %2d   %5u      %-10zu   %6.2f    %-12zu   \033[1;36m│\033[0m\n",
-               i, (unsigned long)ta->system_tid, i,
-               ta->num_rows, ta->num_pixels,
-               ta->cpu_time * 1000.0, ta->result.size);
+        total_thread_cpu += args[i].cpu_time_user + args[i].cpu_time_sys;
+        total_compressed += args[i].result.size;
     }
 
-    printf("\033[1;36m└────────────────────────────────────────────────────────────────────────────┘\033[0m\n");
+    /* Mostrar segmentos de memoria DESPUÉS de ejecutar (actualizado) */
+    print_memory_segments(&img, args, num_threads, &stack_marker_top, &stack_marker_bottom);
 
-    /* ─── Liberar toda la memoria ─── */
+    /* Mostrar resultados de ejecución */
+    const char *CYAN = "\033[36m";
+    const char *RESET = "\033[0m";
+
+    printf("\n");
+    printf("%s╔════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s              \033[33m*** RESULTADOS DE EJECUCIÓN - MODO PARALELO ***\033[0m               %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╠════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+
+    print_thread_distribution(args, num_threads, &img, "COMPLETADO");
+    print_thread_results(args, num_threads);
+    print_execution_metrics(elapsed, user_t, sys_t, total_thread_cpu,
+                            total_compressed + 8, raw_size, num_threads);
+
+    /* Escribir archivo de salida */
+    char outpath[512];
+    if (argc >= 2)
+        snprintf(outpath, sizeof(outpath), "%s.rle", argv[1]);
+    else
+        snprintf(outpath, sizeof(outpath), "output_paralelo.rle");
+
+    FILE *fout = fopen(outpath, "wb");
+    if (fout) {
+        uint32_t header[2] = { img.width, img.height };
+        fwrite(header, sizeof(uint32_t), 2, fout);
+        for (int i = 0; i < num_threads; i++)
+            fwrite(args[i].result.data, 1, args[i].result.size, fout);
+        fclose(fout);
+        printf("\n  Archivo guardado: %s\n\n", outpath);
+    }
+
+    /* Liberar memoria */
     free(img.data);
     for (int i = 0; i < num_threads; i++)
         free(args[i].result.data);
