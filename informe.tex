@@ -1237,17 +1237,19 @@ Utilizando los datos CSV de PC sampling generados durante la ejecución, se cons
 % ════════════════════════════════════════════════════════════════════
 
 \begin{enumerate}
-    \item \textbf{Estructura de memoria}: Cada hilo tiene su propia pila (512 KB) pero comparte el heap. La imagen de entrada está en una región read-only del heap; cada hilo escribe en su propio buffer.
+    \item \textbf{Estructura de memoria del SO}: Cada hilo posee su propia pila (512 KB asignada por \texttt{mmap}) pero comparte el heap del proceso. La imagen de entrada reside en una región read-only del heap (sin mutex); cada hilo escribe en su propio buffer privado (sin condiciones de carrera). Esta arquitectura demuestra los conceptos de espacios de direcciones compartidos vs privados en threads POSIX.
 
-    \item \textbf{Sin sincronización costosa}: Al dividir los datos sin solapamiento, se elimina la necesidad de mutex. Solo se usan variables atómicas para reportar progreso.
+    \item \textbf{Sincronización y coherencia de caché}: La versión inicial usaba \texttt{atomic\_fetch\_add} en el hot loop, causando cache-line bouncing entre 8 cores (protocolo MESI). La solución---acumular localmente y sincronizar al final---es un patrón fundamental de \emph{reducción} en programación paralela que minimiza la contención de bus.
 
-    \item \textbf{Métricas por hilo}: Las APIs Mach (\texttt{thread\_info}) permiten medir el CPU consumido por cada hilo individualmente, demostrando paralelismo real.
+    \item \textbf{Scheduling y creación de hilos}: El \texttt{usleep(1000)} entre \texttt{pthread\_create} causaba que los hilos entraran escalonadamente a la cola \emph{ready} del scheduler Mach. Sin la pausa, los 8 hilos se crean en $<1$ ms y el scheduler los distribuye en los cores disponibles (4P + 4E del Apple M1).
 
-    \item \textbf{Afinidad de cores}: \texttt{THREAD\_AFFINITY\_POLICY} sugiere al kernel distribuir hilos en cores diferentes, mejorando la utilización del CPU.
+    \item \textbf{Instrumentación del SO}: Las APIs Mach (\texttt{thread\_info} con \texttt{THREAD\_BASIC\_INFO}) permitieron medir CPU por hilo; \texttt{clock\_gettime(CLOCK\_MONOTONIC)} midió wall time; y \texttt{getrusage} reportó tiempos de proceso. El PC sampling capturó la evolución del Program Counter de cada hilo, visualizado en el diagrama de Gantt.
 
-    \item \textbf{Speedup real}: Tras la optimización (eliminación de \texttt{usleep} y \texttt{atomic\_fetch\_add} del hot loop, migración a RGB), se alcanzó un speedup de \textbf{3.89x} con 8 cores en Apple M1, demostrando paralelismo efectivo en compresión RLE.
+    \item \textbf{Afinidad de cores}: \texttt{THREAD\_AFFINITY\_POLICY} via la Mach API sugiere al kernel distribuir hilos en cores físicos distintos, reduciendo la interferencia entre caches L1/L2 y mejorando el throughput paralelo.
 
-    \item \textbf{Optimizaciones clave}: La eliminación de \texttt{usleep(1000)} en el loop de creación de hilos y de \texttt{atomic\_fetch\_add} en el hot loop de compresión fueron determinantes para pasar de un speedup de 0.82x (paralelo más lento) a 3.89x (paralelo 3.89 veces más rápido).
+    \item \textbf{Ley de Amdahl en la práctica}: Con datos grayscale (2.7 MB, $\sim$350 KB/hilo), la fracción serial dominaba y el speedup era 0.82x. Con RGB (8 MB, $\sim$1 MB/hilo), la fracción paralela domina, alcanzando \textbf{3.89x}---demostrando que el speedup depende de la relación trabajo-útil/overhead.
+
+    \item \textbf{De speedup negativo a positivo}: La evolución de 0.82x $\rightarrow$ 3.89x ilustra que el paralelismo no es automático: requiere (1) suficiente volumen de datos, (2) mínima sincronización en el hot path, y (3) creación eficiente de hilos. Este proyecto demostró los tres aspectos con evidencia cuantitativa.
 \end{enumerate}
 \section{Anexos}
 % ════════════════════════════════════════════════════════════════════
@@ -1255,28 +1257,25 @@ Utilizando los datos CSV de PC sampling generados durante la ejecución, se cons
 \subsection{Anexo A: Compilación y ejecución rápida}
 
 \begin{lstlisting}[style=bashstyle, caption={Comandos para compilar y ejecutar el proyecto}]
-# Compilar
-make all
+# Compilar ambos programas
+gcc -o rle_secuencial rle_secuencial.c -lpthread -lm
+gcc -o rle_paralelo rle_paralelo.c -lpthread -lm
 
-# Ejecutar version secuencial (imagen sintetica)
+# Ejecutar con imagen sintetica (sin argumentos)
 ./rle_secuencial
-
-# Ejecutar version paralela (imagen sintetica)
 ./rle_paralelo
 
-# Ejecutar con archivo PPM
-./rle_secuencial foto.ppm
-./rle_paralelo foto.ppm
+# Ejecutar con imagen real (PNG, JPG, BMP, etc.)
+./rle_secuencial imagen.jpg
+./rle_paralelo imagen.jpg
 
-# Verificar que ambos producen el mismo resultado
-diff output_secuencial.rle output_paralelo.rle
+# Script unificado (abre explorador de archivos en macOS)
+chmod +x run_compresion.sh
+./run_compresion.sh
 
-# Ejecutar benchmark completo (5 iteraciones)
-chmod +x benchmark.sh
-./benchmark.sh 5
-
-# Limpiar
-make clean
+# Script unificado con imagen por argumento
+./run_compresion.sh /ruta/a/imagen.jpg
+# Ejecuta secuencial + paralelo + genera diagrama de Gantt
 \end{lstlisting}
 
 \subsection{Anexo B: Makefile completo}
@@ -1284,27 +1283,20 @@ make clean
 \begin{lstlisting}[style=makestyle, caption={Makefile del proyecto}]
 CC = gcc
 CFLAGS = -Wall -Wextra -O2
-LDFLAGS = -lpthread
+LDFLAGS = -lpthread -lm
 
 all: rle_secuencial rle_paralelo
 
-rle_secuencial: rle_secuencial.c
+rle_secuencial: rle_secuencial.c stb_image.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-rle_paralelo: rle_paralelo.c
+rle_paralelo: rle_paralelo.c stb_image.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
-
-secuencial: rle_secuencial
-paralelo: rle_paralelo
-
-benchmark: all
-	@chmod +x benchmark.sh
-	@./benchmark.sh
 
 clean:
-	rm -f rle_secuencial rle_paralelo *.rle reporte_analisis.txt
+	rm -f rle_secuencial rle_paralelo *.rle *.raw *.bmp *.csv
 
-.PHONY: all clean secuencial paralelo benchmark
+.PHONY: all clean
 \end{lstlisting}
 
 \subsection{Anexo C: Formato del archivo .rle}
@@ -1330,5 +1322,51 @@ Donde cada run codifica:
     \item \texttt{count}: 1 byte (1--255), número de píxeles consecutivos con el mismo color.
     \item \texttt{R, G, B}: 1 byte cada uno (0--255), componentes del color.
 \end{itemize}
+
+\subsection{Anexo D: Script unificado \texttt{run\_compresion.sh}}
+
+El script unificado automatiza todo el pipeline: selección de imagen (via explorador de archivos en macOS o argumento), ejecución secuencial, ejecución paralela, generación del diagrama de Gantt con Python/matplotlib, y resumen de archivos generados.
+
+\begin{lstlisting}[style=bashstyle, caption={Flujo principal de run\_compresion.sh (simplificado)}]
+#!/bin/bash
+# 1. Seleccionar imagen (explorador macOS o argumento)
+IMAGE_PATH=$(osascript -e 'choose file with prompt ...')
+
+# 2. Ejecutar compresion SECUENCIAL (1 hilo)
+./rle_secuencial "$IMAGE_PATH"
+# Genera: *_secuencial.rle, *_secuencial_gantt.csv
+
+# 3. Ejecutar compresion PARALELA (8 hilos)
+./rle_paralelo "$IMAGE_PATH"
+# Genera: *_paralelo.rle, *_paralelo_gantt.csv
+
+# 4. Generar diagrama de Gantt (Python + matplotlib)
+python3 gantt_chart.py "$CSV_SEQ" "$CSV_PAR" "$GANTT_PNG"
+# Genera: *_gantt_scheduling.png (5x2 grid)
+
+# 5. Abrir diagrama de Gantt
+open "$GANTT_PNG"
+\end{lstlisting}
+
+\subsection{Anexo E: Archivos generados por ejecución}
+
+\begin{table}[H]
+\centering
+\caption{Archivos generados por cada ejecución del pipeline}
+\begin{tabular}{@{}llp{6cm}@{}}
+    \toprule
+    \textbf{Archivo} & \textbf{Tipo} & \textbf{Descripción} \\
+    \midrule
+    \texttt{*\_secuencial.rle}     & Binario & Imagen comprimida con RLE (secuencial) \\
+    \texttt{*\_paralelo.rle}       & Binario & Imagen comprimida con RLE (paralelo) \\
+    \texttt{*\_secuencial\_descomprimida.bmp} & BMP 24-bit & Imagen descomprimida (verificación de integridad) \\
+    \texttt{*\_paralelo\_descomprimida.bmp}   & BMP 24-bit & Imagen descomprimida (verificación de integridad) \\
+    \texttt{*.raw}                 & Raw RGB & Datos crudos en escala de grises/RGB \\
+    \texttt{*\_secuencial\_gantt.csv} & CSV & Datos de PC sampling del hilo secuencial \\
+    \texttt{*\_paralelo\_gantt.csv}  & CSV & Datos de PC sampling de los 8 hilos paralelos \\
+    \texttt{*\_gantt\_scheduling.png} & PNG & Diagrama de Gantt comparativo (5 filas $\times$ 2 columnas) \\
+    \bottomrule
+\end{tabular}
+\end{table}
 
 \end{document}

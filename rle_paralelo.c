@@ -24,6 +24,9 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <dirent.h>
+#include <signal.h>
+#include <errno.h>
+#include <malloc/malloc.h>  /* macOS: malloc_size() */
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -50,6 +53,34 @@ static int g_num_threads_config = 8;
 static int g_uninitialized_var;
 static size_t g_total_runs_global;
 static atomic_size_t g_total_runs_atomic;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  INFRAESTRUCTURA DE SEGUIMIENTO (Phase, Syscall, Heap, Signal, Context)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Phase tracking */
+typedef enum { PHASE_INIT=0, PHASE_COMPRESS, PHASE_DECOMPRESS, PHASE_OUTPUT, PHASE_CLEANUP, PHASE_COUNT } ProgramPhase;
+static const char *g_phase_names[] = {"Inicializacion", "Compresion", "Descompresion", "Salida", "Limpieza"};
+static ProgramPhase g_current_phase = PHASE_INIT;
+
+/* Syscall tracking (max 32 entries) */
+typedef struct { const char *name; const char *real_syscall; const char *purpose; int count_by_phase[PHASE_COUNT]; int total; } SyscallEntry;
+static SyscallEntry g_syscall_table[32];
+static int g_num_tracked_syscalls = 0;
+
+/* Heap tracking (max 64 entries) */
+typedef struct { void *addr; size_t requested_size; size_t actual_size; const char *label; int freed; } HeapAllocation;
+static HeapAllocation g_heap_log[64];
+static int g_num_heap_entries = 0;
+
+/* Signal tracking */
+typedef struct { int signum; const char *name; const char *description; volatile sig_atomic_t received_count; } SignalEntry;
+static SignalEntry g_signal_table[8];
+static int g_num_signals = 0;
+
+/* Context switch baseline */
+static long g_baseline_vcsw = 0, g_baseline_ivcsw = 0;
+static long g_baseline_minflt = 0, g_baseline_majflt = 0;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  ESTRUCTURAS DE DATOS
@@ -182,6 +213,94 @@ static void get_process_cpu_times(double *user_s, double *sys_s) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  FUNCIONES AUXILIARES DE SEGUIMIENTO
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void track_syscall(const char *name, const char *real_syscall, const char *purpose) {
+    for (int i = 0; i < g_num_tracked_syscalls; i++) {
+        if (strcmp(g_syscall_table[i].name, name) == 0) {
+            g_syscall_table[i].count_by_phase[g_current_phase]++;
+            g_syscall_table[i].total++;
+            return;
+        }
+    }
+    if (g_num_tracked_syscalls < 32) {
+        SyscallEntry *e = &g_syscall_table[g_num_tracked_syscalls];
+        e->name = name;
+        e->real_syscall = real_syscall;
+        e->purpose = purpose;
+        memset(e->count_by_phase, 0, sizeof(e->count_by_phase));
+        e->count_by_phase[g_current_phase] = 1;
+        e->total = 1;
+        g_num_tracked_syscalls++;
+    }
+}
+
+static void track_heap_alloc(void *addr, size_t requested, const char *label) {
+    if (!addr || g_num_heap_entries >= 64) return;
+    HeapAllocation *h = &g_heap_log[g_num_heap_entries];
+    h->addr = addr;
+    h->requested_size = requested;
+    h->actual_size = malloc_size(addr);
+    h->label = label;
+    h->freed = 0;
+    g_num_heap_entries++;
+}
+
+static void track_heap_free(void *addr) {
+    for (int i = 0; i < g_num_heap_entries; i++) {
+        if (g_heap_log[i].addr == addr && !g_heap_log[i].freed) {
+            g_heap_log[i].freed = 1;
+            return;
+        }
+    }
+}
+
+static void demo_signal_handler(int sig) {
+    for (int i = 0; i < g_num_signals; i++) {
+        if (g_signal_table[i].signum == sig) {
+            g_signal_table[i].received_count++;
+            return;
+        }
+    }
+}
+
+static void register_signal(int signum, const char *name, const char *desc) {
+    if (g_num_signals >= 8) return;
+    SignalEntry *s = &g_signal_table[g_num_signals];
+    s->signum = signum;
+    s->name = name;
+    s->description = desc;
+    s->received_count = 0;
+    g_num_signals++;
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = demo_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(signum, &sa, NULL);
+}
+
+static void setup_signal_handlers(void) {
+    register_signal(SIGSEGV, "SIGSEGV", "Violacion de segmento (acceso invalido a memoria)");
+    register_signal(SIGFPE,  "SIGFPE",  "Excepcion de punto flotante (division por cero)");
+    register_signal(SIGBUS,  "SIGBUS",  "Error de bus (alineacion de memoria)");
+    register_signal(SIGABRT, "SIGABRT", "Aborto del proceso (assert fallido)");
+    register_signal(SIGINT,  "SIGINT",  "Interrupcion por teclado (Ctrl+C)");
+    register_signal(SIGTERM, "SIGTERM", "Solicitud de terminacion (kill default)");
+}
+
+static void capture_baseline_ctx(void) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    g_baseline_vcsw  = ru.ru_nvcsw;
+    g_baseline_ivcsw = ru.ru_nivcsw;
+    g_baseline_minflt = ru.ru_minflt;
+    g_baseline_majflt = ru.ru_majflt;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  BUFFER DINÁMICO
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -190,6 +309,8 @@ static void buffer_init(Buffer *buf, size_t cap) {
     if (!buf->data) { perror("malloc"); exit(1); }
     buf->size = 0;
     buf->capacity = cap;
+    track_syscall("malloc", "mmap/sbrk", "Reservar memoria dinamica para buffer");
+    track_heap_alloc(buf->data, cap, "Buffer RLE (por hilo)");
 }
 
 static void buffer_push(Buffer *buf, const uint8_t *bytes, size_t n) {
@@ -217,6 +338,8 @@ static int load_image(const char *path, Image *img) {
     img->width = (uint32_t)w;
     img->height = (uint32_t)h;
     img->data = pixels;  /* stb_image usa malloc internamente → datos en HEAP */
+    track_syscall("stbi_load", "open+read+mmap", "Cargar imagen desde disco (stb_image)");
+    track_heap_alloc(pixels, (size_t)w * h * 3, "img.data (pixeles RGB imagen)");
     printf("\n  \033[32mImagen cargada:\033[0m %s\n", path);
     printf("    Dimensiones: %d x %d px (%d canales originales → RGB)\n", w, h, channels);
     printf("    Tamaño datos: %zu bytes (%.2f MB)\n\n",
@@ -421,6 +544,7 @@ static void save_bmp(const char *path, const uint8_t *pixels,
 
     FILE *f = fopen(path, "wb");
     if (!f) { perror("fopen bmp"); return; }
+    track_syscall("fopen", "open", "Abrir archivo BMP para escritura");
 
     uint8_t fh[14] = {0};
     fh[0] = 'B'; fh[1] = 'M';
@@ -460,6 +584,8 @@ static void save_bmp(const char *path, const uint8_t *pixels,
         fwrite(row, 1, row_stride, f);
     }
     free(row);
+    track_syscall("fwrite", "write", "Escribir datos BMP a disco");
+    track_syscall("fclose", "close", "Cerrar archivo BMP");
     fclose(f);
 }
 
@@ -1012,6 +1138,587 @@ static void print_resource_timeline(ThreadArg *args, int num_threads,
     printf("%s║%s  │                                                                                  │  %s║%s\n", CYAN, RESET, CYAN, RESET);
     printf("%s║%s  └──────────────────────────────────────────────────────────────────────────────────┘  %s║%s\n", CYAN, RESET, CYAN, RESET);
 
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  1. TABLA DE LLAMADAS AL SISTEMA (SYSCALL TABLE)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_syscall_table(void) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sTABLA DE LLAMADAS AL SISTEMA (SYSCALLS) - MODO PARALELO%s                         %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %sEl programa invoca funciones POSIX/C que se traducen a syscalls del kernel:%s        %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  %sCada syscall implica un cambio User Mode → Kernel Mode (trap/interrupcion).%s       %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    printf("%s║%s  %s┌─────────────────────────────────────────────────────────────────────────────────┐%s %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sFuncion POSIX/C        Syscall real           Proposito                 Cnt%s  │ %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ ─────────────────────  ─────────────────────  ────────────────────────  ─────  │ %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    for (int i = 0; i < g_num_tracked_syscalls; i++) {
+        SyscallEntry *e = &g_syscall_table[i];
+        printf("%s║%s  │ %s%-21s%s %s%-21s%s  %-24s  %s%3d%s  │ %s║%s\n",
+               CYAN, RESET, GREEN, e->name, RESET,
+               MAGENTA, e->real_syscall, RESET,
+               e->purpose, RED, e->total, RESET, CYAN, RESET);
+    }
+
+    printf("%s║%s  %s└─────────────────────────────────────────────────────────────────────────────────┘%s %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Phase breakdown */
+    printf("%s║%s  %s┌─ DESGLOSE POR FASE ──────────────────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sFase              Syscalls  Descripcion%s                                      │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ────────────────  ────────  ──────────────────────────────────────────────    │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    for (int p = 0; p < PHASE_COUNT; p++) {
+        int phase_total = 0;
+        for (int i = 0; i < g_num_tracked_syscalls; i++)
+            phase_total += g_syscall_table[i].count_by_phase[p];
+        printf("%s║%s  │  %-16s  %s%5d%s     %s                                                │  %s║%s\n",
+               CYAN, RESET, g_phase_names[p], GREEN, phase_total, RESET,
+               p == 0 ? "Setup de handlers, malloc, carga imagen"
+               : p == 1 ? "pthread_create, join, thread_info, compress"
+               : p == 2 ? "malloc decompress, memcmp verificacion"
+               : p == 3 ? "fopen, fwrite, fclose (RLE, BMP, CSV)"
+               : "free() de todos los buffers",
+               CYAN, RESET);
+    }
+
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Parallel-specific: thread-related syscalls */
+    printf("%s║%s  %s┌─ SYSCALLS ESPECIFICAS DE HILOS (PARALELO) ──────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sFuncion              Syscall macOS          Proposito%s                       │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ ──────────────────   ──────────────────────  ──────────────────────────────  │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %spthread_create%s      %sbsdthread_create%s        Crear hilo de ejecucion        │  %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │ %spthread_join%s        %sfutex/bsdthread_term%s    Esperar terminacion de hilo    │  %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sthread_info%s         %sMach trap%s               Obtener tiempo CPU del hilo    │  %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sthread_policy_set%s   %sMach trap%s               Establecer afinidad de core    │  %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │ %spthread_threadid_np%s %sMach trap%s               Obtener TID del sistema        │  %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │ %spthread_mach_np%s     %sMach trap%s               Obtener Mach port del hilo     │  %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                               │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sNota: En Linux, pthread_create usa clone(), no bsdthread_create.%s            │  %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sEn macOS, las APIs de Mach son traps separados de las syscalls POSIX.%s      │  %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  2. VISUALIZACIÓN DEL HEAP (HEAP VISUALIZATION)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_heap_visualization(void) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sVISUALIZACIÓN DEL HEAP - ASIGNACIONES DINÁMICAS (PARALELO)%s                     %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %sEl heap crece hacia direcciones ALTAS. malloc() pide memoria al SO via sbrk/mmap.%s %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  %smalloc_size() retorna el tamaño REAL (con padding de alineación del allocator).%s   %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    printf("%s║%s  %s┌─────────────────────────────────────────────────────────────────────────────────┐%s %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s#   Direccion         Solicitado     Real (malloc_size)  Etiqueta%s              │ %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ ──  ────────────────   ────────────   ──────────────────  ──────────────────────│ %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    size_t total_requested = 0, total_actual = 0;
+    for (int i = 0; i < g_num_heap_entries; i++) {
+        HeapAllocation *h = &g_heap_log[i];
+        const char *status_color = h->freed ? RED : GREEN;
+        const char *status_str = h->freed ? "[LIBRE]" : "[ACTIVO]";
+        printf("%s║%s  │ %s%-2d%s  %s0x%014lx%s   %s%10zu B%s   %s%10zu B%s    %s%-18s%s %s%s%s│ %s║%s\n",
+               CYAN, RESET, GREEN, i, RESET,
+               MAGENTA, (unsigned long)h->addr, RESET,
+               YELLOW, h->requested_size, RESET,
+               GREEN, h->actual_size, RESET,
+               WHITE, h->label, RESET,
+               status_color, status_str, RESET, CYAN, RESET);
+        total_requested += h->requested_size;
+        total_actual += h->actual_size;
+    }
+
+    printf("%s║%s  │                                                                                 │ %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sTotal solicitado: %zu B (%.2f MB)  Real: %zu B (%.2f MB)%s                   │ %s║%s\n",
+           CYAN, RESET, WHITE, total_requested, total_requested / (1024.0*1024.0),
+           total_actual, total_actual / (1024.0*1024.0), RESET, CYAN, RESET);
+    printf("%s║%s  │ %sOverhead del allocator: %zu B (%.1f%%)%s                                        │ %s║%s\n",
+           CYAN, RESET, DIM, total_actual - total_requested,
+           total_requested > 0 ? (total_actual - total_requested) * 100.0 / total_requested : 0,
+           RESET, CYAN, RESET);
+    printf("%s║%s  %s└─────────────────────────────────────────────────────────────────────────────────┘%s %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Parallel-specific: sharing model */
+    printf("%s║%s  %s┌─ MODELO DE COMPARTICIÓN EN MULTI-HILO ─────────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %simg.data%s         → %sCOMPARTIDA%s (lectura por todos los hilos, sin mutex)   │    %s║%s\n", CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sargs[i].result%s   → %sPRIVADO por hilo%s (escritura sin mutex)               │    %s║%s\n", CYAN, RESET, GREEN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sthreads[]%s        → %sArray de pthread_t%s (solo main escribe/lee)            │    %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sargs[]%s           → %sArray de ThreadArg%s (main escribe, workers leen)       │    %s║%s\n", CYAN, RESET, GREEN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sNota: Cada buffer de hilo esta en paginas SEPARADAS del heap,%s               │    %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sevitando false sharing (diferentes lineas de cache L1).%s                     │    %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  3. VARIABLES GLOBALES Y SEGMENTOS DE MEMORIA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_global_variables(void) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sVARIABLES GLOBALES Y SEGMENTOS DE MEMORIA (PARALELO)%s                            %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %sLas variables globales son COMPARTIDAS entre hilos (mismo espacio de direcciones).%s %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* DATA segment */
+    printf("%s║%s  %s┌─ SEGMENTO DATA (variables inicializadas) ──────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sVariable               Direccion           Tam    Valor%s                    │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ─────────────────────  ──────────────────  ─────  ─────────────────────     │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_initialized_var      %s0x%014lx%s  4 B    valor: %d               │    %s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_initialized_var, RESET, g_initialized_var, CYAN, RESET);
+    printf("%s║%s  │  g_program_name         %s0x%014lx%s  8 B    \"%s\"           │    %s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_program_name, RESET, g_program_name, CYAN, RESET);
+    printf("%s║%s  │  g_num_threads_config   %s0x%014lx%s  4 B    valor: %d                │    %s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_num_threads_config, RESET, g_num_threads_config, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* BSS segment */
+    printf("%s║%s  %s┌─ SEGMENTO BSS (variables no inicializadas, a 0) ──────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sVariable               Direccion           Tam    Valor%s                    │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ─────────────────────  ──────────────────  ─────  ─────────────────────     │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_uninitialized_var    %s0x%014lx%s  4 B    valor: %d                │    %s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_uninitialized_var, RESET, g_uninitialized_var, CYAN, RESET);
+    printf("%s║%s  │  g_total_runs_global    %s0x%014lx%s  8 B    valor: %zu             │    %s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_total_runs_global, RESET, g_total_runs_global, CYAN, RESET);
+    printf("%s║%s  │  g_total_runs_atomic    %s0x%014lx%s  8 B    %s(atomico)%s                │    %s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_total_runs_atomic, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Thread safety analysis */
+    printf("%s║%s  %s┌─ PELIGROS EN MULTI-HILO ────────────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sg_total_runs_global%s:  %sPELIGRO%s - data race sin proteccion                    │  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │    → Si 2 hilos hacen g_total_runs_global++ simultaneamente,                   │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │      se pierde un incremento (read-modify-write NO es atomico).                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sg_total_runs_atomic%s:  %sSEGURO%s - usa atomic_store/load (CAS hardware)         │  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → El CPU garantiza atomicidad con instrucciones LOCK CMPXCHG.               │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sg_initialized_var%s:    %sSEGURO%s - solo lectura (inmutable despues de init)      │  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → Multiples lectores simultaneos son seguros sin mutex.                     │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sg_pc_samples%s:         %sN/A%s - cada hilo escribe a su propia seccion          │  %s║%s\n",
+           CYAN, RESET, WHITE, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │    → de ThreadArg (particionado, sin compartir).                               │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sRegla:%s Las variables globales son COMPARTIDAS entre hilos                     │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  (mismo espacio de direcciones). Requieren mutex o atomics para escritura.     │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  4. DEMOSTRACIÓN DE TRAPS E INTERRUPCIONES
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_trap_demo(void) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sTRAPS E INTERRUPCIONES DEL SISTEMA OPERATIVO (PARALELO)%s                         %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Trap types */
+    printf("%s║%s  %s┌─ TIPOS DE TRAP ────────────────────────────────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s1. Syscall Trap%s (instruccion SVC/INT 0x80):                                │    %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     Programa llama read()/write()/mmap() → CPU cambia a modo kernel          │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │     El SO ejecuta la syscall y retorna al modo usuario.                      │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s2. Exception Trap%s (fallo de pagina, div/0, segfault):                      │    %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │     CPU detecta error → trap al kernel → kernel decide:                      │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │       a) Page fault valido → cargar pagina desde disco (demand paging)       │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │       b) Segfault invalido → enviar SIGSEGV al proceso                       │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s3. Interrupt (hardware)%s:                                                   │    %s║%s\n", CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │     Timer interrupt → scheduler decide si cambiar de hilo/proceso             │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │     Disco completo → wakeup del hilo bloqueado en I/O                        │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Mach Traps section (parallel-specific) */
+    printf("%s║%s  %s┌─ MACH TRAPS (macOS - ESPECIFICO DE HILOS) ────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sthread_info()%s       → Mach trap table (separada de POSIX)                  │    %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sthread_policy_set()%s → Mach trap table (configurar scheduling del hilo)     │    %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %stask_info()%s         → Mach trap table (info de memoria del proceso)        │    %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sNota:%s En macOS hay DOS tablas de traps:                                    │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    • Tabla POSIX: open, read, write, mmap, fork, etc.                        │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    • Tabla Mach: thread_info, task_info, mach_msg, etc.                       │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Signal handlers */
+    printf("%s║%s  %s┌─ SEÑALES REGISTRADAS (via sigaction) ─────────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sSenal       Num   Descripcion                            Recibidas%s       │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ──────────  ────  ──────────────────────────────────────  ─────────        │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    for (int i = 0; i < g_num_signals; i++) {
+        SignalEntry *s = &g_signal_table[i];
+        printf("%s║%s  │  %s%-10s%s  %s%3d%s   %-38s  %s%5d%s        │    %s║%s\n",
+               CYAN, RESET, GREEN, s->name, RESET,
+               MAGENTA, s->signum, RESET,
+               s->description,
+               s->received_count > 0 ? RED : DIM,
+               (int)s->received_count, RESET, CYAN, RESET);
+    }
+
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sEn multi-hilo:%s                                                              │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    %sSIGSEGV en Hilo 3 → handler ejecuta en Hilo 3%s (senal sincrona)           │    %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │    %sSIGINT  (Ctrl+C)  → entregada a CUALQUIER hilo%s (senal asincrona)         │    %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │    %spthread_sigmask()%s permite controlar mascara de senales por hilo.           │    %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  5. COMUNICACIÓN ENTRE HILOS Y PROCESOS (IPC) - EXCLUSIVO PARALELO
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_ipc_visualization(ThreadArg *args, int num_threads, size_t total_pixels) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sCOMUNICACIÓN ENTRE HILOS Y PROCESOS (IPC) - PARALELO%s                            %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* 4 mechanisms */
+    printf("%s║%s  %s┌─ MECANISMOS DE COMUNICACIÓN USADOS ────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s1. Memoria compartida%s (img.data leida por todos los hilos)                   │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     → Todos los hilos leen del mismo buffer sin copia. Solo lectura = seguro. │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s2. Variables atomicas%s (pixels_done, g_total_runs_atomic)                     │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     → Operaciones lock-free con garantia de coherencia (CAS/LOCK prefix).     │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s3. Argumentos de hilo%s (main escribe ThreadArg, worker lee)                   │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     → Patron productor-consumidor: main prepara, hilo consume.                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s4. Barrera pthread_join%s (sincronizacion de finalizacion)                     │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     → Main se bloquea hasta que todos los workers terminan.                   │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Scatter/Gather diagram */
+    printf("%s║%s  %s┌─ PATRÓN SCATTER / GATHER ──────────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sSCATTER (distribuir)                       GATHER (recoger)%s                  │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    int show = num_threads > 4 ? 4 : num_threads;
+    for (int i = 0; i < show; i++) {
+        if (i == 0) {
+            printf("%s║%s  │  %sPADRE%s ──args[%d]──→ %sHilo %d%s ──result[%d]──→ %sPADRE%s                         │  %s║%s\n",
+                   CYAN, RESET, MAGENTA, RESET, i, GREEN, i, RESET, i, MAGENTA, RESET, CYAN, RESET);
+        } else {
+            printf("%s║%s  │         ──args[%d]──→ %sHilo %d%s ──result[%d]──→ %s(concat)%s                        │  %s║%s\n",
+                   CYAN, RESET, i, GREEN, i, RESET, i, YELLOW, RESET, CYAN, RESET);
+        }
+    }
+    if (num_threads > 4) {
+        printf("%s║%s  │         ...          %s...%s     ...                                          │  %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+        printf("%s║%s  │         ──args[%d]──→ %sHilo %d%s ──result[%d]──→ %s(concat)%s                        │  %s║%s\n",
+               CYAN, RESET, num_threads-1, GREEN, num_threads-1, RESET, num_threads-1, YELLOW, RESET, CYAN, RESET);
+    }
+
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Join barrier visualization */
+    printf("%s║%s  %s┌─ BARRERA DE SINCRONIZACIÓN (pthread_join) ─────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Show bars converging */
+    const char *HCOLORS[] = {
+        "\033[41;37m", "\033[42;30m", "\033[43;30m", "\033[44;37m",
+        "\033[45;37m", "\033[46;30m", "\033[47;30m", "\033[100;37m"
+    };
+    int max_bar = 40;
+    for (int i = 0; i < num_threads && i < 8; i++) {
+        int bar_len = max_bar - (i * 2);
+        if (bar_len < 10) bar_len = 10;
+        printf("%s║%s  │  H%d ", CYAN, RESET, i);
+        for (int b = 0; b < bar_len; b++)
+            printf("%s█%s", HCOLORS[i % 8], RESET);
+        int pad = max_bar - bar_len;
+        for (int p = 0; p < pad; p++) printf("─");
+        if (i == 0)
+            printf("┐                      │  %s║%s\n", CYAN, RESET);
+        else if (i == num_threads - 1 || i == 7)
+            printf("┘──→ main() continua   │  %s║%s\n", CYAN, RESET);
+        else
+            printf("┤ pthread_join()        │  %s║%s\n", CYAN, RESET);
+    }
+
+    printf("%s║%s  │                        %s(barrera implicita)%s                                    │  %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Comparison table: Threads vs Processes */
+    printf("%s║%s  %s┌─ COMPARACIÓN: HILOS vs PROCESOS ──────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sConcepto           Hilos (pthread)         Procesos (fork)%s                   │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ─────────────────  ──────────────────────  ────────────────────────            │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  Memoria compartida  %sSI (mismo heap)%s        %sNO (copia COW/shm_open)%s          │  %s║%s\n", CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │  Sincronizacion      %satomics/mutex%s          %ssemaforos/pipes%s                   │  %s║%s\n", CYAN, RESET, GREEN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │  Creacion            %spthread_create%s         %sfork()%s                            │  %s║%s\n", CYAN, RESET, GREEN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │  Crash de un hilo    %sMata TODO el proceso%s   %sSolo el hijo muere%s                │  %s║%s\n", CYAN, RESET, RED, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │  Espacio de dir.     %sCompartido%s             %sSeparado%s                          │  %s║%s\n", CYAN, RESET, GREEN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │  Overhead            %sBajo%s                   %sAlto (copiar tablas)%s              │  %s║%s\n", CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Byte ranges per thread */
+    printf("%s║%s  %s┌─ RANGOS DE BYTES POR HILO (de ThreadArg) ────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sHilo   Offset inicio      Offset fin          Bytes          Filas%s       │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  ─────  ──────────────────  ──────────────────  ─────────────  ──────────   │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    for (int i = 0; i < num_threads && i < 8; i++) {
+        size_t start_off = args[i].byte_offset;
+        size_t end_off = start_off + args[i].num_pixels;
+        printf("%s║%s  │  %s[%d]%s    %s%16zu%s  %s%16zu%s  %s%13zu%s  %4u-%-5u   │    %s║%s\n",
+               CYAN, RESET, GREEN, i, RESET,
+               MAGENTA, start_off, RESET,
+               MAGENTA, end_off, RESET,
+               YELLOW, args[i].num_pixels, RESET,
+               args[i].start_row, args[i].start_row + args[i].num_rows - 1,
+               CYAN, RESET);
+    }
+    if (num_threads > 8) {
+        printf("%s║%s  │  %s...%s                                                                     │    %s║%s\n", CYAN, RESET, DIM, RESET, CYAN, RESET);
+    }
+
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sTotal: %zu bytes (%zu pixeles RGB)%s                                       │    %s║%s\n",
+           CYAN, RESET, WHITE, total_pixels * 3, total_pixels, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  6. INFORMACIÓN DE INTERRUPCIONES Y CAMBIOS DE CONTEXTO
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_interrupts_info(void) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    long vcsw  = ru.ru_nvcsw  - g_baseline_vcsw;
+    long ivcsw = ru.ru_nivcsw - g_baseline_ivcsw;
+    long minflt = ru.ru_minflt - g_baseline_minflt;
+    long majflt = ru.ru_majflt - g_baseline_majflt;
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sINTERRUPCIONES Y CAMBIOS DE CONTEXTO (PARALELO)%s                                 %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    printf("%s║%s  %s┌─ CAMBIOS DE CONTEXTO (getrusage RUSAGE_SELF) ─────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sVoluntarios (vcsw):%s    %s%6ld%s  (hilo se bloquea: I/O, join, sleep)         │    %s║%s\n",
+           CYAN, RESET, WHITE, RESET, GREEN, vcsw, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sInvoluntarios (ivcsw):%s %s%6ld%s  (quantum expiro: timer interrupt del SO)    │    %s║%s\n",
+           CYAN, RESET, WHITE, RESET, RED, ivcsw, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sTotal:%s                 %s%6ld%s                                               │    %s║%s\n",
+           CYAN, RESET, WHITE, RESET, YELLOW, vcsw + ivcsw, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sPage faults menores:%s   %s%6ld%s  (pagina en RAM pero no mapeada)              │    %s║%s\n",
+           CYAN, RESET, WHITE, RESET, GREEN, minflt, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sPage faults mayores:%s   %s%6ld%s  (pagina en disco, requiere I/O)              │    %s║%s\n",
+           CYAN, RESET, WHITE, RESET, RED, majflt, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Parallel-specific explanations */
+    printf("%s║%s  %s┌─ EXPLICACIÓN PARA MULTI-HILO ──────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sMas cambios voluntarios esperados:%s                                           │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    → N pthread_join() donde main espera = N cambios voluntarios adicionales.   │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → Cada join() es un punto de bloqueo (vcsw++).                             │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sMas cambios involuntarios esperados:%s                                         │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    → N hilos compiten por quantum de CPU del scheduler.                       │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → Si N > num_cores, se producen preemptions (ivcsw++).                     │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sMas page faults esperados:%s                                                   │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    → N asignaciones de buffer (una por hilo) disparan demand paging.          │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → N stacks de pthread (512 KB cada uno) tambien causan page faults.        │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Visual: context switch flow */
+    printf("%s║%s  │  %sFlujo de un cambio de contexto involuntario:%s                                 │  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    %sHilo A (ejecutando)%s                                                        │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │        │                                                                       │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │        ▼ Timer interrupt (hardware)                                            │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    %s[KERNEL]%s Guardar registros Hilo A → scheduler → Restaurar Hilo B          │  %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │        │                                                                       │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │        ▼                                                                       │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    %sHilo B (ejecutando)%s                                                        │  %s║%s\n", CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  7. DEMOSTRACIÓN DE MANEJO DE ERRORES
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_error_handling_demo(void) {
+    const char *CYAN = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *WHITE = "\033[1;37m";
+    const char *MAGENTA = "\033[35m";
+    const char *RESET = "\033[0m";
+    const char *DIM = "\033[2m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s     %sMANEJO DE ERRORES Y CÓDIGOS DE RETORNO (PARALELO)%s                                %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* errno */
+    printf("%s║%s  %s┌─ VARIABLE errno (THREAD-LOCAL) ───────────────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %serrno%s es %sTHREAD-LOCAL (TLS)%s: cada hilo tiene su propia copia.              │    %s║%s\n", CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │  Implementado con __thread o pthread_key en la TLS area del hilo.            │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sValor actual (main):%s  errno = %s%d%s (%s%s%s)                                     │    %s║%s\n",
+           CYAN, RESET, WHITE, RESET, GREEN, errno, RESET,
+           MAGENTA, errno == 0 ? "Sin error" : strerror(errno), RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sEjemplos de errno en este programa:%s                                         │    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │    fopen() falla  →  errno = ENOENT (%d): No such file                       │    %s║%s\n",
+           CYAN, RESET, ENOENT, CYAN, RESET);
+    printf("%s║%s  │    malloc() falla →  errno = ENOMEM (%d): Cannot allocate memory             │    %s║%s\n",
+           CYAN, RESET, ENOMEM, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Error handling patterns */
+    printf("%s║%s  %s┌─ PATRONES DE MANEJO DE ERRORES ────────────────────────────────────────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s1. Retorno de funciones POSIX:%s  0 = exito, -1 = error (errno seteado)       │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     if (fopen(...) == NULL) { perror(\"fopen\"); }                               │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s2. Retorno de pthreads:%s  0 = exito, codigo error directo (no errno)          │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     int ret = pthread_create(...);                                             │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │     if (ret == EAGAIN) → demasiados hilos activos                              │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │     if (ret == ENOMEM) → sin memoria para stack del hilo                       │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s3. Retorno de Mach:%s  KERN_SUCCESS = exito, otros = error                     │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     if (thread_info(...) != KERN_SUCCESS) → Mach port invalido                 │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s4. Punteros NULL:%s  malloc/stbi_load retornan NULL si fallan                  │  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │     if (!ptr) { perror(\"malloc\"); exit(1); }                                   │  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Parallel-specific error handling */
+    printf("%s║%s  %s┌─ ERRORES ESPECIFICOS DE MULTI-HILO ───────────────────────────────────────┐%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %serrno es thread-local (TLS)%s:                                                │    %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │    → Cada hilo tiene su propia copia de errno en su TLS area.                │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → Un fallo en Hilo 2 NO sobreescribe errno del Hilo 0.                    │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %spthread_create retorno%s:                                                     │    %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → EAGAIN: demasiados hilos (limite del SO alcanzado)                      │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │    → ENOMEM: sin memoria para el stack del nuevo hilo (512KB)                │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %sSenales sincronas vs asincronas%s:                                             │    %s║%s\n", CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │    → %sSIGSEGV (sincrona)%s: entregada al hilo que causo el fallo                │    %s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │    → %sSIGINT (asincrona)%s: entregada a cualquier hilo sin mascara              │    %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │    → pthread_sigmask() controla que senales acepta cada hilo.                 │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                              │    %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────┘%s    %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
     printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
 }
 

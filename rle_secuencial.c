@@ -19,6 +19,9 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <dirent.h>
+#include <signal.h>
+#include <errno.h>
+#include <malloc/malloc.h>  /* macOS: malloc_size() */
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -41,6 +44,33 @@ static const char *g_program_name = "RLE Secuencial";
 /* Variables en segmento BSS (no inicializadas, se inicializan a 0) */
 static int g_uninitialized_var;
 static size_t g_total_runs;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SEGUIMIENTO DE FASES DEL PROGRAMA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef enum { PHASE_INIT=0, PHASE_COMPRESS, PHASE_DECOMPRESS, PHASE_OUTPUT, PHASE_CLEANUP, PHASE_COUNT } ProgramPhase;
+static const char *g_phase_names[] = {"Inicializacion", "Compresion", "Descompresion", "Salida", "Limpieza"};
+static ProgramPhase g_current_phase = PHASE_INIT;
+
+/* Seguimiento de syscalls (max 32 entradas) */
+typedef struct { const char *name; const char *real_syscall; const char *purpose; int count_by_phase[PHASE_COUNT]; int total; } SyscallEntry;
+static SyscallEntry g_syscall_table[32];
+static int g_num_tracked_syscalls = 0;
+
+/* Seguimiento de asignaciones en heap (max 32 entradas) */
+typedef struct { void *addr; size_t requested_size; size_t actual_size; const char *label; int freed; } HeapAllocation;
+static HeapAllocation g_heap_log[32];
+static int g_num_heap_entries = 0;
+
+/* Seguimiento de señales (max 8 entradas) */
+typedef struct { int signum; const char *name; const char *description; volatile sig_atomic_t received_count; } SignalEntry;
+static SignalEntry g_signal_table[8];
+static int g_num_signals = 0;
+
+/* Baseline de cambios de contexto */
+static long g_baseline_vcsw = 0, g_baseline_ivcsw = 0;
+static long g_baseline_minflt = 0, g_baseline_majflt = 0;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  ESTRUCTURAS DE DATOS
@@ -139,6 +169,81 @@ static void get_process_cpu_times(double *user_s, double *sys_s) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  FUNCIONES AUXILIARES DE SEGUIMIENTO (Tracking Helpers)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void track_syscall(const char *name, const char *real_syscall, const char *purpose) {
+    for (int i = 0; i < g_num_tracked_syscalls; i++) {
+        if (strcmp(g_syscall_table[i].name, name) == 0 && strcmp(g_syscall_table[i].purpose, purpose) == 0) {
+            g_syscall_table[i].count_by_phase[g_current_phase]++;
+            g_syscall_table[i].total++;
+            return;
+        }
+    }
+    if (g_num_tracked_syscalls < 32) {
+        int idx = g_num_tracked_syscalls++;
+        g_syscall_table[idx].name = name;
+        g_syscall_table[idx].real_syscall = real_syscall;
+        g_syscall_table[idx].purpose = purpose;
+        memset(g_syscall_table[idx].count_by_phase, 0, sizeof(int)*PHASE_COUNT);
+        g_syscall_table[idx].count_by_phase[g_current_phase] = 1;
+        g_syscall_table[idx].total = 1;
+    }
+}
+
+static void track_heap_alloc(void *addr, size_t requested, const char *label) {
+    if (g_num_heap_entries < 32 && addr) {
+        HeapAllocation *e = &g_heap_log[g_num_heap_entries++];
+        e->addr = addr; e->requested_size = requested;
+        e->actual_size = malloc_size(addr);
+        e->label = label; e->freed = 0;
+    }
+}
+
+static void track_heap_free(void *addr) {
+    for (int i = 0; i < g_num_heap_entries; i++)
+        if (g_heap_log[i].addr == addr && !g_heap_log[i].freed) { g_heap_log[i].freed = 1; return; }
+}
+
+static void demo_signal_handler(int sig) {
+    for (int i = 0; i < g_num_signals; i++)
+        if (g_signal_table[i].signum == sig) { g_signal_table[i].received_count++; return; }
+}
+
+static void register_signal(int signum, const char *name, const char *desc) {
+    if (g_num_signals < 8) {
+        g_signal_table[g_num_signals].signum = signum;
+        g_signal_table[g_num_signals].name = name;
+        g_signal_table[g_num_signals].description = desc;
+        g_signal_table[g_num_signals].received_count = 0;
+        struct sigaction sa;
+        sa.sa_handler = demo_signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(signum, &sa, NULL);
+        g_num_signals++;
+    }
+}
+
+static void setup_signal_handlers(void) {
+    register_signal(SIGSEGV, "SIGSEGV", "Acceso a memoria invalida");
+    register_signal(SIGFPE,  "SIGFPE",  "Error aritmetico (div/0)");
+    register_signal(SIGBUS,  "SIGBUS",  "Error de bus (alignment)");
+    register_signal(SIGABRT, "SIGABRT", "Abortar (assert/abort)");
+    register_signal(SIGINT,  "SIGINT",  "Interrupcion (Ctrl+C)");
+    register_signal(SIGTERM, "SIGTERM", "Terminacion solicitada");
+    track_syscall("sigaction", "rt_sigaction", "Registrar manejador de senial");
+}
+
+static void capture_baseline_ctx(void) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    g_baseline_vcsw = ru.ru_nvcsw; g_baseline_ivcsw = ru.ru_nivcsw;
+    g_baseline_minflt = ru.ru_minflt; g_baseline_majflt = ru.ru_majflt;
+    track_syscall("getrusage", "getrusage", "Leer estadisticas del proceso (baseline)");
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  BUFFER DINÁMICO (HEAP)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -147,6 +252,8 @@ static void buffer_init(Buffer *buf, size_t cap) {
     if (!buf->data) { perror("malloc"); exit(1); }
     buf->size = 0;
     buf->capacity = cap;
+    track_syscall("malloc", "mmap/brk", "Asignar buffer de compresion");
+    track_heap_alloc(buf->data, cap, "Buffer compresion");
 }
 
 static void buffer_push(Buffer *buf, const uint8_t *bytes, size_t n) {
@@ -174,6 +281,8 @@ static int load_image(const char *path, Image *img) {
     img->width = (uint32_t)w;
     img->height = (uint32_t)h;
     img->data = pixels;  /* stb_image usa malloc internamente → datos en HEAP */
+    track_syscall("stbi_load", "mmap/read", "Cargar imagen desde disco");
+    track_heap_alloc(img->data, (size_t)w * h * 3, "Imagen RGB");
     printf("\n  \033[32mImagen cargada:\033[0m %s\n", path);
     printf("    Dimensiones: %d x %d px (%d canales originales → RGB)\n", w, h, channels);
     printf("    Tamaño datos: %zu bytes (%.2f MB)\n\n",
@@ -292,6 +401,7 @@ static void save_bmp(const char *path, const uint8_t *pixels,
 
     FILE *f = fopen(path, "wb");
     if (!f) { perror("fopen bmp"); return; }
+    track_syscall("fopen", "open", "Abrir archivo BMP para escritura");
 
     uint8_t fh[14] = {0};
     fh[0] = 'B'; fh[1] = 'M';
@@ -331,7 +441,9 @@ static void save_bmp(const char *path, const uint8_t *pixels,
         fwrite(row, 1, row_stride, f);
     }
     free(row);
+    track_syscall("fwrite", "write", "Escribir datos BMP a disco");
     fclose(f);
+    track_syscall("fclose", "close", "Cerrar archivo BMP");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -519,6 +631,434 @@ static void print_execution_results(double elapsed, double user_t, double sys_t,
            CYAN, RESET, WHITE, RESET, GREEN, ratio, RESET, CYAN, RESET);
     printf("%s║%s  %sRuns generados:%s              %s%12zu%s                                              %s║%s\n",
            CYAN, RESET, WHITE, RESET, GREEN, g_total_runs, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  1. VISUALIZACIÓN DE LLAMADAS AL SISTEMA (SYSCALLS)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_syscall_table(void) {
+    const char *CYAN   = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN  = "\033[32m";
+    const char *WHITE  = "\033[1;37m";
+    const char *RED    = "\033[31m";
+    const char *MAGENTA= "\033[35m";
+    const char *RESET  = "\033[0m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s           %sLLAMADAS AL SISTEMA OPERATIVO (System Calls)%s                              %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ Que es una syscall? ──────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ Una llamada al sistema (syscall) es el mecanismo por el cual un programa en    │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ modo usuario solicita un servicio al kernel del SO. Se ejecuta una instruccion │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ TRAP (int 0x80 / syscall / svc) que cambia de %sUser Mode%s a %sKernel Mode%s.         │%s║%s\n", CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │ El kernel ejecuta la operacion privilegiada y retorna con IRET/ERET.           │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Tabla de syscalls */
+    printf("%s║%s  %s┌──────────────┬────────────────┬─────────────────┬───────┬──────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sFuncion C%s     │ %sSyscall real%s    │ %sFase%s              │%sConteo%s│ %sProposito%s             │%s║%s\n",
+           CYAN, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s├──────────────┼────────────────┼─────────────────┼───────┼──────────────────────┤%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+
+    int total_syscalls = 0;
+    for (int i = 0; i < g_num_tracked_syscalls; i++) {
+        /* Determinar la fase principal */
+        int max_phase = 0;
+        for (int p = 1; p < PHASE_COUNT; p++)
+            if (g_syscall_table[i].count_by_phase[p] > g_syscall_table[i].count_by_phase[max_phase])
+                max_phase = p;
+
+        printf("%s║%s  │ %s%-12s%s │ %-14s │ %-15s │  %s%3d%s  │ %-20s │%s║%s\n",
+               CYAN, RESET,
+               GREEN, g_syscall_table[i].name, RESET,
+               g_syscall_table[i].real_syscall,
+               g_phase_names[max_phase],
+               MAGENTA, g_syscall_table[i].total, RESET,
+               g_syscall_table[i].purpose,
+               CYAN, RESET);
+        total_syscalls += g_syscall_table[i].total;
+    }
+    printf("%s║%s  %s└──────────────┴────────────────┴─────────────────┴───────┴──────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %sTotal de llamadas al sistema registradas: %s%d%s                                       %s║%s\n",
+           CYAN, RESET, WHITE, GREEN, total_syscalls, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Diagrama ASCII de transicion */
+    printf("%s║%s  %s┌─ Ejemplo: malloc() → mmap ──────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                  │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │   %sPROGRAMA%s ──malloc()──> %slibc%s ──mmap()──> %sTRAP%s ──> %sKERNEL%s ──> %sIRET%s ──> %sPROGRAMA%s │%s║%s\n",
+           CYAN, RESET, GREEN, RESET, YELLOW, RESET, RED, RESET, MAGENTA, RESET, RED, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %s(user mode)%s                             %s(switch)%s   %s(kernel)%s  %s(return)%s %s(user mode)%s│%s║%s\n",
+           CYAN, RESET, GREEN, RESET, RED, RESET, MAGENTA, RESET, RED, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                  │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  2. VISUALIZACIÓN DEL HEAP (Memoria Dinámica)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_heap_visualization(void) {
+    const char *CYAN   = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN  = "\033[32m";
+    const char *WHITE  = "\033[1;37m";
+    const char *RED    = "\033[31m";
+    const char *MAGENTA= "\033[35m";
+    const char *RESET  = "\033[0m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s           %sVISUALIZACION DEL HEAP (Memoria Dinamica)%s                                %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ Que es el Heap? ─────────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ El heap es la region de memoria para asignacion dinamica (malloc/free).        │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ Crece hacia direcciones ALTAS. El kernel asigna paginas via brk() o mmap().   │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ En macOS, el allocator usa un sistema de %s\"magazines\"%s (libmalloc) que agrupa    │%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │ bloques por tamanio para reducir fragmentacion. Bloques grandes (>64KB) usan  │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ mmap() directamente, creando regiones independientes en el espacio virtual.   │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Tabla de asignaciones */
+    printf("%s║%s  %s┌────┬──────────────────┬──────────────────┬────────────┬────────────┬────────┐%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s#%s  │ %sEtiqueta%s         │ %sDireccion%s        │ %sSolicitado%s │ %sReal(msize)%s│%sEstado%s │  %s║%s\n",
+           CYAN, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  %s├────┼──────────────────┼──────────────────┼────────────┼────────────┼────────┤%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+
+    size_t total_requested = 0, total_actual = 0;
+    int active_count = 0, freed_count = 0;
+
+    for (int i = 0; i < g_num_heap_entries; i++) {
+        HeapAllocation *e = &g_heap_log[i];
+        total_requested += e->requested_size;
+        total_actual += e->actual_size;
+        if (e->freed) freed_count++; else active_count++;
+
+        printf("%s║%s  │ %s%2d%s │ %-16s │ %s0x%012lx%s   │ %s%8zu B%s │ %s%8zu B%s │  %s%s%s   │  %s║%s\n",
+               CYAN, RESET,
+               MAGENTA, i + 1, RESET,
+               e->label,
+               MAGENTA, (unsigned long)e->addr, RESET,
+               GREEN, e->requested_size, RESET,
+               YELLOW, e->actual_size, RESET,
+               e->freed ? RED : GREEN,
+               e->freed ? "LIBRE" : "ACTIV",
+               RESET,
+               CYAN, RESET);
+    }
+    printf("%s║%s  %s└────┴──────────────────┴──────────────────┴────────────┴────────────┴────────┘%s  %s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Estadisticas */
+    double frag_pct = total_requested > 0 ? ((double)(total_actual - total_requested) / total_actual) * 100.0 : 0;
+    printf("%s║%s  %s┌─ Estadisticas del Heap ────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  Total solicitado:         %s%10zu bytes%s  (%s%.2f MB%s)                         │%s║%s\n",
+           CYAN, RESET, GREEN, total_requested, RESET, GREEN, total_requested / (1024.0 * 1024.0), RESET, CYAN, RESET);
+    printf("%s║%s  │  Total real (malloc_size): %s%10zu bytes%s  (%s%.2f MB%s)                         │%s║%s\n",
+           CYAN, RESET, YELLOW, total_actual, RESET, YELLOW, total_actual / (1024.0 * 1024.0), RESET, CYAN, RESET);
+    printf("%s║%s  │  Fragmentacion interna:    %s%10.1f %%%s                                          │%s║%s\n",
+           CYAN, RESET, RED, frag_pct, RESET, CYAN, RESET);
+    printf("%s║%s  │  Bloques activos / libres: %s%d activos%s / %s%d liberados%s                              │%s║%s\n",
+           CYAN, RESET, GREEN, active_count, RESET, RED, freed_count, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %sNota:%s En macOS, el magazine allocator de libmalloc agrupa bloques pequenios en     %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  regiones (\"magazines\"). Bloques >64KB se asignan directamente via mmap().          %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  malloc_size() retorna el tamanio real del bloque incluyendo overhead de alignment.  %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  3. VISUALIZACIÓN DE VARIABLES GLOBALES - Segmentos DATA y BSS
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_global_variables(void) {
+    const char *CYAN   = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN  = "\033[32m";
+    const char *WHITE  = "\033[1;37m";
+    const char *MAGENTA= "\033[35m";
+    const char *RESET  = "\033[0m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s           %sVARIABLES GLOBALES - Segmentos DATA y BSS%s                                %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ DATA vs BSS ─────────────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sDATA:%s Contiene variables globales/static con valor inicial explicito.         │%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │       Se almacenan en el ejecutable en disco (ocupan espacio en el binario).   │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sBSS:%s  Contiene variables globales/static inicializadas a cero.                │%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │       NO ocupan espacio en el binario; el kernel las inicializa a 0 al cargar. │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │       Esto reduce significativamente el tamanio del ejecutable.                │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Tabla DATA */
+    printf("%s║%s  %s┌─ Segmento DATA (variables inicializadas) ─────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-24s %-18s %-8s %-20s │%s║%s\n",
+           CYAN, RESET, "Variable", "Direccion", "Bytes", "Valor", CYAN, RESET);
+    printf("%s║%s  │  ──────────────────────── ────────────────── ──────── ──────────────────── │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_initialized_var        %s0x%014lx%s   4       valor: %s%d%s               │%s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_initialized_var, RESET, GREEN, g_initialized_var, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_program_name           %s0x%014lx%s   8       \"%s%s%s\"       │%s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_program_name, RESET, GREEN, g_program_name, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Tabla BSS */
+    printf("%s║%s  %s┌─ Segmento BSS (variables zero-initialized) ──────────────────────────────────┐%s%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-24s %-18s %-8s %-20s │%s║%s\n",
+           CYAN, RESET, "Variable", "Direccion", "Bytes", "Contenido", CYAN, RESET);
+    printf("%s║%s  │  ──────────────────────── ────────────────── ──────── ──────────────────── │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_uninitialized_var      %s0x%014lx%s   4       valor: %s%d%s               │%s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_uninitialized_var, RESET, GREEN, g_uninitialized_var, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_total_runs             %s0x%014lx%s   8       valor: %s%zu%s             │%s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)&g_total_runs, RESET, GREEN, g_total_runs, RESET, CYAN, RESET);
+    printf("%s║%s  │  g_pc_samples[%d]          %s0x%014lx%s   %5zu   array PCSample          │%s║%s\n",
+           CYAN, RESET, MAX_PC_SAMPLES, MAGENTA, (unsigned long)g_pc_samples, RESET, sizeof(g_pc_samples), CYAN, RESET);
+    printf("%s║%s  │  g_syscall_table[32]      %s0x%014lx%s   %5zu   tabla de syscalls        │%s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)g_syscall_table, RESET, sizeof(g_syscall_table), CYAN, RESET);
+    printf("%s║%s  │  g_heap_log[32]           %s0x%014lx%s   %5zu   registro del heap        │%s║%s\n",
+           CYAN, RESET, MAGENTA, (unsigned long)g_heap_log, RESET, sizeof(g_heap_log), CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %sNota:%s En la version secuencial no hay riesgo de data race porque solo hay 1 hilo.%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  Las variables globales son seguras sin necesidad de mutex o atomics.                %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  4. MECANISMO DE TRAPS (Interrupciones Software)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_trap_demo(void) {
+    const char *CYAN   = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN  = "\033[32m";
+    const char *WHITE  = "\033[1;37m";
+    const char *RED    = "\033[31m";
+    const char *MAGENTA= "\033[35m";
+    const char *RESET  = "\033[0m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s           %sMECANISMO DE TRAPS (Interrupciones Software)%s                              %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ Tipos de Traps ──────────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s1. Syscall Trap:%s El programa invoca voluntariamente al kernel (read, write,   │%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │    mmap, etc.) mediante instruccion SVC (ARM64) o SYSCALL (x86_64).            │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s2. Exception Trap:%s Error de HW: division por cero, acceso invalido a memoria, │%s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │    page fault. El CPU genera la excepcion automaticamente.                     │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s3. Signal Trap:%s El kernel entrega una senial al proceso (SIGSEGV, SIGFPE,     │%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │    SIGINT). Puede tener handler registrado o usar accion por defecto.          │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+#ifdef __APPLE__
+    printf("%s║%s  %s┌─ macOS: Mach Traps ───────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ En macOS/Darwin, ademas de POSIX syscalls, existen %sMach Traps%s: llamadas al    │%s║%s\n", CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │ microkernel Mach. Se usan para: task_info(), mach_task_self(),                 │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ thread_info(), mach_vm_allocate(), etc. Son un mecanismo separado de POSIX.    │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ task_info() → Mach Trap para obtener estadisticas de memoria del proceso.      │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+#endif
+
+    /* Tabla de seniales */
+    printf("%s║%s  %s┌─ Seniales registradas ────────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-10s %-8s %-12s %-10s %-28s │%s║%s\n",
+           CYAN, RESET, "Senial", "Numero", "Handler", "Recibidas", "Descripcion", CYAN, RESET);
+    printf("%s║%s  │  ────────── ──────── ──────────── ────────── ──────────────────────────── │%s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    int total_signals = 0;
+    for (int i = 0; i < g_num_signals; i++) {
+        printf("%s║%s  │  %s%-10s%s %-8d %s%-12s%s %s%-10d%s %-28s │%s║%s\n",
+               CYAN, RESET,
+               YELLOW, g_signal_table[i].name, RESET,
+               g_signal_table[i].signum,
+               GREEN, "Registrado", RESET,
+               MAGENTA, (int)g_signal_table[i].received_count, RESET,
+               g_signal_table[i].description,
+               CYAN, RESET);
+        total_signals += (int)g_signal_table[i].received_count;
+    }
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Diagrama de transicion User <-> Kernel */
+    printf("%s║%s  %s┌─ Transicion User Mode <-> Kernel Mode ────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                  │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │   %s┌──────────────┐%s         TRAP/SVC          %s┌──────────────┐%s                   │%s║%s\n",
+           CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │   │  %sUser Mode%s   │ ═══════════════════> │  %sKernel Mode%s │                   │%s║%s\n",
+           CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │   │  (programa)  │ <═══════════════════ │  (SO kernel) │                   │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │   %s└──────────────┘%s        IRET/ERET         %s└──────────────┘%s                   │%s║%s\n",
+           CYAN, RESET, GREEN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │                                                                                  │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Resumen */
+    printf("%s║%s  %sResumen:%s POSIX syscalls: %s%d%s | Mach traps: %s~3%s (task_info, thread_info)            %s║%s\n",
+           CYAN, RESET, WHITE, g_num_tracked_syscalls, GREEN, g_num_tracked_syscalls, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s           Seniales recibidas: %s%d%s | Excepciones HW: %s0%s (ejecucion normal)          %s║%s\n",
+           CYAN, RESET, YELLOW, total_signals, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  5. INTERRUPCIONES Y CAMBIOS DE CONTEXTO
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_interrupts_info(void) {
+    const char *CYAN   = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN  = "\033[32m";
+    const char *WHITE  = "\033[1;37m";
+    const char *RED    = "\033[31m";
+    const char *MAGENTA= "\033[35m";
+    const char *RESET  = "\033[0m";
+
+    /* Obtener deltas de rusage */
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    long delta_vcsw  = ru.ru_nvcsw  - g_baseline_vcsw;
+    long delta_ivcsw = ru.ru_nivcsw - g_baseline_ivcsw;
+    long delta_minflt = ru.ru_minflt - g_baseline_minflt;
+    long delta_majflt = ru.ru_majflt - g_baseline_majflt;
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s           %sINTERRUPCIONES Y CAMBIOS DE CONTEXTO%s                                     %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ Tipos de Interrupciones ─────────────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sHW Interrupts:%s Timer (quantum expiro), I/O (disco/red completo),              │%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │   IPI (Inter-Processor Interrupt para sincronizar cores).                      │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sSW Interrupts:%s Syscalls (programa solicita servicio), Page faults (acceso a   │%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │   pagina no mapeada), excepciones aritmeticas (div/0, overflow).               │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Tabla de getrusage deltas */
+    printf("%s║%s  %s┌─ Estadisticas del proceso (getrusage delta) ──────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-35s %s%10ld%s                              │%s║%s\n",
+           CYAN, RESET, "Cambios de contexto voluntarios:", GREEN, delta_vcsw, RESET, CYAN, RESET);
+    printf("%s║%s  │    %s-> Causa: bloqueo por I/O (read, write, fopen, etc.)%s                       │%s║%s\n",
+           CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-35s %s%10ld%s                              │%s║%s\n",
+           CYAN, RESET, "Cambios de contexto involuntarios:", YELLOW, delta_ivcsw, RESET, CYAN, RESET);
+    printf("%s║%s  │    %s-> Causa: timer interrupt (quantum expiro, scheduler preemptivo)%s           │%s║%s\n",
+           CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-35s %s%10ld%s                              │%s║%s\n",
+           CYAN, RESET, "Minor page faults:", GREEN, delta_minflt, RESET, CYAN, RESET);
+    printf("%s║%s  │    %s-> Causa: pagina en memoria pero no mapeada (demand paging, COW)%s          │%s║%s\n",
+           CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-35s %s%10ld%s                              │%s║%s\n",
+           CYAN, RESET, "Major page faults:", RED, delta_majflt, RESET, CYAN, RESET);
+    printf("%s║%s  │    %s-> Causa: pagina en disco (swap), requiere I/O de disco%s                    │%s║%s\n",
+           CYAN, RESET, MAGENTA, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Explicacion adicional */
+    printf("%s║%s  %s┌─ Que significan estos numeros? ───────────────────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sVoluntarios altos:%s El proceso hizo mucho I/O (archivos, red).                 │%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sInvoluntarios altos:%s El scheduler interrumpio el proceso frecuentemente       │%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │   (mucha competencia por CPU o quantum pequenio).                              │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sMinor faults altos:%s El proceso toco muchas paginas nuevas (heap grande,       │%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │   primera lectura de datos mapeados). Es normal para compresion de imagenes.   │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %sMajor faults > 0:%s Hubo acceso a paginas en swap (presion de memoria).         │%s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  6. MANEJO DE ERRORES (Error Handling)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void print_error_handling_demo(void) {
+    const char *CYAN   = "\033[36m";
+    const char *YELLOW = "\033[1;33m";
+    const char *GREEN  = "\033[32m";
+    const char *WHITE  = "\033[1;37m";
+    const char *RED    = "\033[31m";
+    const char *MAGENTA= "\033[35m";
+    const char *RESET  = "\033[0m";
+
+    printf("\n");
+    printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+    printf("%s║%s           %sMANEJO DE ERRORES (Error Handling)%s                                        %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s┌─ 3 Mecanismos de manejo de errores en C/POSIX ─────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s1. errno:%s Variable global thread-local. Despues de una syscall fallida,        │%s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
+    printf("%s║%s  │    errno contiene el codigo de error. strerror(errno) da descripcion legible.  │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s2. Signal handlers:%s El kernel envia seniales ante eventos excepcionales.       │%s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │    Se registran con sigaction(). Ejemplo: SIGSEGV ante acceso invalido.        │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │ %s3. Return codes:%s Las funciones retornan codigos de error (NULL, -1, etc.).     │%s║%s\n", CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │    El programa debe verificar cada retorno y actuar en consecuencia.           │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Demo de errno */
+    printf("%s║%s  %s┌─ Demo errno: intentar abrir archivo inexistente ──────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    errno = 0;
+    FILE *bad = fopen("/nonexistent_rle_demo", "r");
+    int saved_errno = errno;
+    if (bad) fclose(bad); /* No deberia pasar */
+    printf("%s║%s  │  fopen(\"/nonexistent_rle_demo\", \"r\") → %sNULL%s                                  │%s║%s\n",
+           CYAN, RESET, RED, RESET, CYAN, RESET);
+    printf("%s║%s  │  errno = %s%d%s (%s%s%s)                                                            │%s║%s\n",
+           CYAN, RESET, MAGENTA, saved_errno, RESET, RED, strerror(saved_errno), RESET, CYAN, RESET);
+    printf("%s║%s  │  Significado: %sENOENT%s = El archivo o directorio no existe.                     │%s║%s\n",
+           CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+    printf("%s║%s  │  El kernel retorna este error via la syscall open() al no encontrar el path.   │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Tabla de puntos de manejo de errores en el programa */
+    printf("%s║%s  %s┌─ Puntos de manejo de errores en este programa ────────────────────────────────┐%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %-14s %-10s │%s║%s\n",
+           CYAN, RESET, "Funcion", "Error posible", "Accion", "Severidad", CYAN, RESET);
+    printf("%s║%s  │  ──────────────────── ────────────────────── ────────────── ────────── │%s║%s\n", CYAN, RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %s%-14s%s %s%-10s%s │%s║%s\n",
+           CYAN, RESET, "malloc()", "Sin memoria (NULL)", RED, "exit(1)", RESET, RED, "CRITICA", RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %s%-14s%s %s%-10s%s │%s║%s\n",
+           CYAN, RESET, "realloc()", "Sin memoria (NULL)", RED, "exit(1)", RESET, RED, "CRITICA", RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %s%-14s%s %s%-10s%s │%s║%s\n",
+           CYAN, RESET, "stbi_load()", "Formato invalido", YELLOW, "return -1", RESET, YELLOW, "ALTA", RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %s%-14s%s %s%-10s%s │%s║%s\n",
+           CYAN, RESET, "fopen()", "Archivo no existe", YELLOW, "return/skip", RESET, YELLOW, "MEDIA", RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %s%-14s%s %s%-10s%s │%s║%s\n",
+           CYAN, RESET, "rle_decompress()", "Datos corruptos", YELLOW, "return NULL", RESET, YELLOW, "ALTA", RESET, CYAN, RESET);
+    printf("%s║%s  │  %-20s %-22s %s%-14s%s %s%-10s%s │%s║%s\n",
+           CYAN, RESET, "memcmp()", "Datos no coinciden", GREEN, "aviso", RESET, GREEN, "BAJA", RESET, CYAN, RESET);
+    printf("%s║%s  %s└──────────────────────────────────────────────────────────────────────────────────┘%s%s║%s\n", CYAN, RESET, WHITE, RESET, CYAN, RESET);
+    printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+
+    /* Seniales registradas */
+    printf("%s║%s  %sHandlers de seniales registrados:%s %s%d seniales%s con handler personalizado          %s║%s\n",
+           CYAN, RESET, WHITE, RESET, GREEN, g_num_signals, RESET, CYAN, RESET);
+    printf("%s║%s  (SIGSEGV, SIGFPE, SIGBUS, SIGABRT, SIGINT, SIGTERM)                                %s║%s\n", CYAN, RESET, CYAN, RESET);
     printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
     printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n", CYAN, RESET);
 }
