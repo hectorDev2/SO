@@ -916,7 +916,7 @@ static void print_trap_demo(void) {
 
     /* Resumen */
     printf("%s║%s  %sResumen:%s POSIX syscalls: %s%d%s | Mach traps: %s~3%s (task_info, thread_info)            %s║%s\n",
-           CYAN, RESET, WHITE, g_num_tracked_syscalls, GREEN, g_num_tracked_syscalls, RESET, MAGENTA, RESET, CYAN, RESET);
+           CYAN, RESET, WHITE, RESET, GREEN, g_num_tracked_syscalls, RESET, MAGENTA, RESET, CYAN, RESET);
     printf("%s║%s           Seniales recibidas: %s%d%s | Excepciones HW: %s0%s (ejecucion normal)          %s║%s\n",
            CYAN, RESET, YELLOW, total_signals, RESET, GREEN, RESET, CYAN, RESET);
     printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
@@ -1068,6 +1068,11 @@ static void print_error_handling_demo(void) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 int main(int argc, char *argv[]) {
+    /* Inicializar seguimiento de SO */
+    setup_signal_handlers();
+    capture_baseline_ctx();
+    g_current_phase = PHASE_INIT;
+
     /* Variables en STACK */
     Image img;
     Buffer compressed;
@@ -1221,6 +1226,7 @@ int main(int argc, char *argv[]) {
     /* Mostrar segmentos de memoria ANTES de ejecutar */
     print_memory_segments(&img, &compressed, &stack_marker_top, &stack_marker_bottom);
 
+    g_current_phase = PHASE_COMPRESS;
     printf("\n\033[33m  Ejecutando compresión RLE (1 hilo)...\033[0m\n");
 
     /* Medir tiempo */
@@ -1243,6 +1249,10 @@ int main(int argc, char *argv[]) {
     /* Mostrar resultados */
     print_execution_results(elapsed, user_t, sys_t, compressed.size + 8, raw_size);
 
+    /* Mostrar variables globales */
+    print_global_variables();
+
+    g_current_phase = PHASE_OUTPUT;
     /* Escribir archivo de salida */
     char outpath[512];
     if (input_path[0])
@@ -1262,6 +1272,7 @@ int main(int argc, char *argv[]) {
     /* ═══════════════════════════════════════════════════════════════════
      *  DESCOMPRESIÓN Y GENERACIÓN DE IMAGEN BMP
      * ═══════════════════════════════════════════════════════════════════ */
+    g_current_phase = PHASE_DECOMPRESS;
     printf("\n\033[33m  Descomprimiendo datos RLE...\033[0m\n");
 
     struct timespec td_start, td_end;
@@ -1323,6 +1334,15 @@ int main(int argc, char *argv[]) {
     } else {
         printf("  \033[31mError: No se pudo descomprimir los datos RLE.\033[0m\n\n");
     }
+
+    /* ═══════════════════════════════════════════════════════════════════
+     *  VISUALIZACIÓN DE CONCEPTOS DE SO
+     * ═══════════════════════════════════════════════════════════════════ */
+    print_heap_visualization();
+    print_syscall_table();
+    print_trap_demo();
+    print_interrupts_info();
+    print_error_handling_demo();
 
     /* ═══════════════════════════════════════════════════════════════════
      *  EXPORTAR CSV CON DATOS DE SCHEDULING PARA DIAGRAMA DE GANTT
