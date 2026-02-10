@@ -1233,6 +1233,203 @@ Utilizando los datos CSV de PC sampling generados durante la ejecución, se cons
 \end{enumerate}
 
 % ════════════════════════════════════════════════════════════════════
+\section{Iteración 5: Visualización de Conceptos de Sistemas Operativos}
+% ════════════════════════════════════════════════════════════════════
+
+Hasta este punto, los programas mostraban segmentos de memoria (PILA, CÓDIGO, DATOS) y métricas de rendimiento. En esta iteración se solicitó ampliar ambos programas para que \textbf{demuestren visualmente 7 conceptos fundamentales de Sistemas Operativos} durante su ejecución, convirtiendo cada programa en una herramienta educativa integral.
+
+\subsection{Prompt 5: Requerimientos de visualización de conceptos de SO}
+
+\begin{promptbox}
+\small\ttfamily
+Necesito que agreguemos a las apps y podamos observar: Llamadas al SO (cómo lo hace, para qué lo hace), heap, variables globales, trap, Comunicación entre hilos y procesos, Interrupciones, manejo de errores.
+\end{promptbox}
+
+\subsection{Planificación: Modo Plan de Claude Code}
+
+Dado el alcance del cambio (7 nuevos subsistemas en 2 archivos con $\sim$2400 líneas totales), Claude Code activó su \textbf{modo de planificación} para explorar el código existente, diseñar la arquitectura y presentar un plan detallado antes de implementar.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_46.png}
+    \caption{Plan de Claude Code (parte 1): contexto del cambio, nuevos includes (\texttt{signal.h}, \texttt{errno.h}, \texttt{malloc/malloc.h}), estructuras de tracking (\texttt{SyscallEntry}, \texttt{HeapAllocation}, \texttt{SignalEntry}), funciones helper, y detalle de las funciones de visualización \#1 (Syscalls) y \#2 (Heap).}
+    \label{fig:cap46}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_47.png}
+    \caption{Plan de Claude Code (parte 2): funciones \#3 (Variables Globales), \#4 (Traps), \#5 (Comunicación IPC---solo paralelo), \#6 (Interrupciones y Context Switches), \#7 (Manejo de Errores). Incluye el orden de ejecución en \texttt{main()} con fases (\texttt{INIT}, \texttt{COMPRESS}, \texttt{DECOMPRESS}, \texttt{OUTPUT}, \texttt{CLEANUP}).}
+    \label{fig:cap47}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_48.png}
+    \caption{Plan de Claude Code (parte 3): instrumentación de funciones existentes (\texttt{buffer\_init}, \texttt{load\_image}, \texttt{save\_bmp}) con \texttt{track\_syscall()} y \texttt{track\_heap\_alloc()}. Nota: NO rastrear dentro de \texttt{buffer\_push()} (hot loop). Estilo visual con cajas ANSI. Verificación: compilar, ejecutar, verificar integridad y CSV.}
+    \label{fig:cap48}
+\end{figure}
+
+\subsection{Implementación: Las 7 Visualizaciones}
+
+Tras aprobar el plan, Claude Code implementó las 7 funciones de visualización en ambos programas simultáneamente (agentes paralelos), expandiendo \texttt{rle\_secuencial.c} de 840 a \textbf{1395 líneas} y \texttt{rle\_paralelo.c} de 1602 a \textbf{2325 líneas}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_49.png}
+    \caption{Resumen de implementación: tabla comparativa de las 7 visualizaciones de SO en ambos programas. La versión paralela agrega conceptos específicos de concurrencia en cada sección (Mach traps, buffers compartidos, data race, señales en hilos, Scatter/Gather, context switches por pthread\_join, errno thread-local). Estado: compila, integridad CORRECTA, CSV OK.}
+    \label{fig:cap49}
+\end{figure}
+
+La siguiente tabla resume las 7 visualizaciones y sus diferencias entre versión secuencial y paralela:
+
+\begin{table}[H]
+\centering
+\caption{Las 7 visualizaciones de conceptos de SO implementadas}
+\begin{tabular}{@{}clp{4cm}p{4.5cm}@{}}
+    \toprule
+    \textbf{\#} & \textbf{Concepto} & \textbf{Secuencial} & \textbf{Paralelo} \\
+    \midrule
+    1 & Llamadas al SO & Tabla C$\rightarrow$kernel, flujo User/Kernel mode & + \texttt{pthread\_create}, Mach traps \\
+    \addlinespace
+    2 & Heap & Mapa visual con \texttt{malloc\_size()}, fragmentación & + buffers compartidos vs privados \\
+    \addlinespace
+    3 & Variables Globales & DATA/BSS con direcciones reales & + peligros multi-hilo (data race) \\
+    \addlinespace
+    4 & Traps & Tipos de trap, señales, diagrama modo & + Mach traps, señales en hilos \\
+    \addlinespace
+    5 & Comunicación IPC & N/A (no aplica) & Scatter/Gather, \texttt{pthread\_join}, hilos vs procesos \\
+    \addlinespace
+    6 & Interrupciones & Context switches vía \texttt{getrusage()} & + switches por \texttt{pthread\_join} \\
+    \addlinespace
+    7 & Manejo de errores & \texttt{errno} demo, tabla de errores & + \texttt{errno} thread-local \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Detalle Técnico de Cada Visualización}
+
+\subsubsection{1. Llamadas al Sistema (\texttt{print\_syscall\_table})}
+
+Cada función C de biblioteca (ej. \texttt{malloc()}, \texttt{fopen()}) genera internamente una llamada al kernel (\textit{syscall}). Esta visualización registra \textbf{cada syscall} realizada por el programa, agrupada por fase de ejecución:
+
+\begin{itemize}
+    \item \textbf{Mapeo C $\rightarrow$ Kernel}: \texttt{malloc()} $\rightarrow$ \texttt{mmap/brk}, \texttt{fopen()} $\rightarrow$ \texttt{open()}, \texttt{clock\_gettime()} $\rightarrow$ \texttt{clock\_gettime} (syscall directa).
+    \item \textbf{Diagrama de flujo}: Programa $\rightarrow$ TRAP (SVC en ARM64) $\rightarrow$ Kernel Mode $\rightarrow$ IRET $\rightarrow$ Programa.
+    \item \textbf{Paralelo}: agrega \texttt{pthread\_create} $\rightarrow$ \texttt{bsdthread\_create}, \texttt{thread\_info} (Mach trap).
+\end{itemize}
+
+\subsubsection{2. Heap (\texttt{print\_heap\_visualization})}
+
+Visualiza el estado del heap con direcciones \textbf{reales} de cada bloque asignado, usando \texttt{malloc\_size()} de macOS para obtener el tamaño real (incluyendo padding interno del allocator):
+
+\begin{itemize}
+    \item \textbf{Mapa visual}: barras \texttt{██} (asignado) y \texttt{░░} (padding/fragmentación interna).
+    \item \textbf{Estadísticas}: total solicitado vs real, porcentaje de fragmentación interna, bloques activos vs liberados.
+    \item \textbf{Paralelo}: muestra imagen compartida (lectura) + $N$ buffers privados (escritura).
+\end{itemize}
+
+\subsubsection{3. Variables Globales (\texttt{print\_global\_variables})}
+
+Lista todas las variables en los segmentos \textbf{DATA} (inicializadas) y \textbf{BSS} (no inicializadas) con sus direcciones de memoria reales:
+
+\begin{itemize}
+    \item \textbf{Clasificación}: solo lectura, escritura, atómica (CAS---Compare-And-Swap).
+    \item \textbf{Paralelo}: sección ``PELIGROS EN MULTI-HILO''---explica data race vs acceso atómico vs read-only.
+\end{itemize}
+
+\subsubsection{4. Traps (\texttt{print\_trap\_demo})}
+
+Explica los mecanismos de \textit{trap} que permiten la transición User Mode $\leftrightarrow$ Kernel Mode:
+
+\begin{itemize}
+    \item \textbf{3 tipos}: syscall trap (SVC/INT 0x80), exception trap (SIGSEGV, SIGFPE), signal trap (SIGINT).
+    \item \textbf{Tabla de señales}: señales registradas por \texttt{sigaction()} con handler, número y descripción.
+    \item \textbf{macOS}: explica Mach Traps como mecanismo separado de POSIX syscalls.
+\end{itemize}
+
+\subsubsection{5. Comunicación entre Hilos (\texttt{print\_ipc\_visualization})}
+
+\textbf{Solo en la versión paralela}. Visualiza los 4 mecanismos de IPC usados:
+
+\begin{itemize}
+    \item \textbf{Memoria compartida}: \texttt{img.data} (lectura sin mutex).
+    \item \textbf{Variables atómicas}: \texttt{atomic\_store}/\texttt{atomic\_load} para progreso lock-free.
+    \item \textbf{Paso de argumentos}: \texttt{ThreadArg} pasado a cada hilo.
+    \item \textbf{Barrera implícita}: \texttt{pthread\_join} como punto de sincronización.
+    \item \textbf{Diagrama}: SCATTER (distribuir) $\rightarrow$ COMPUTE (comprimir) $\rightarrow$ GATHER (reunir).
+    \item \textbf{Comparativa}: hilos vs procesos (memoria compartida vs \texttt{shm\_open}, crash behavior).
+\end{itemize}
+
+\subsubsection{6. Interrupciones y Context Switches (\texttt{print\_interrupts\_info})}
+
+Muestra estadísticas \textbf{reales} del kernel obtenidas vía \texttt{getrusage()}:
+
+\begin{itemize}
+    \item \textbf{Context switches voluntarios}: cuando un hilo llama a \texttt{pthread\_join} o \texttt{sleep}.
+    \item \textbf{Context switches involuntarios}: cuando el timer del scheduler (quantum) expira.
+    \item \textbf{Page faults}: menores (COW, demand paging) y mayores (disco).
+    \item \textbf{Delta vs baseline}: se captura \texttt{getrusage()} al inicio y al final para mostrar solo los context switches causados por el programa.
+\end{itemize}
+
+\subsubsection{7. Manejo de Errores (\texttt{print\_error\_handling\_demo})}
+
+Demuestra los 3 mecanismos de manejo de errores en C/POSIX:
+
+\begin{itemize}
+    \item \textbf{errno}: variable thread-local. Demo en vivo: intenta abrir archivo inexistente, muestra \texttt{errno=ENOENT} y \texttt{strerror()}.
+    \item \textbf{Signal handlers}: tabla de señales registradas (\texttt{SIGSEGV}, \texttt{SIGFPE}, \texttt{SIGBUS}, \texttt{SIGABRT}, \texttt{SIGINT}).
+    \item \textbf{Return codes}: tabla de todos los puntos de error en el programa con función, error posible, acción tomada y severidad.
+    \item \textbf{Paralelo}: explica que \texttt{errno} es thread-local y que señales síncronas van al hilo específico.
+\end{itemize}
+
+\subsection{Infraestructura de Instrumentación}
+
+Para registrar las llamadas al SO y asignaciones de heap sin modificar el hot loop de compresión, se implementó un sistema de tracking liviano:
+
+\begin{lstlisting}[style=cstyle, caption={Estructuras de tracking (extracto)}]
+/* Registro de cada syscall realizada */
+typedef struct {
+    const char *c_function;     // ej: "malloc"
+    const char *real_syscall;   // ej: "mmap/brk"
+    const char *purpose;        // ej: "Asignar buffer compresion"
+    int count;
+    ProgramPhase phase;         // INIT, COMPRESS, DECOMPRESS, OUTPUT
+} SyscallEntry;
+
+/* Registro de cada asignacion de heap */
+typedef struct {
+    void *address;              // direccion real
+    size_t requested_size;      // tamano solicitado
+    size_t actual_size;         // malloc_size() (incluye padding)
+    const char *label;          // ej: "img.data"
+    int freed;                  // 0=activo, 1=liberado
+} HeapAllocation;
+\end{lstlisting}
+
+\textbf{Nota importante}: El tracking se aplica solo en funciones de alto nivel (\texttt{buffer\_init}, \texttt{load\_image}, \texttt{save\_bmp}), \textbf{nunca} dentro de \texttt{buffer\_push()} (hot loop llamado miles de veces), para no afectar las métricas de rendimiento.
+
+\subsection{Resultado de la Iteración}
+
+Ambos programas compilaron y ejecutaron correctamente con las 7 nuevas visualizaciones:
+
+\begin{table}[H]
+\centering
+\caption{Estado final de los programas tras la Iteración 5}
+\begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Métrica} & \textbf{rle\_secuencial.c} & \textbf{rle\_paralelo.c} \\
+    \midrule
+    Líneas de código       & 1,395 (+555)     & 2,325 (+723) \\
+    Funciones nuevas       & 6 visualizaciones & 7 visualizaciones \\
+    Compilación            & 0 warnings       & 0 warnings \\
+    Integridad (descomp.)  & CORRECTA         & CORRECTA \\
+    CSV scheduling         & OK               & OK \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════
 \section{Conclusiones Técnicas}
 % ════════════════════════════════════════════════════════════════════
 
@@ -1250,6 +1447,12 @@ Utilizando los datos CSV de PC sampling generados durante la ejecución, se cons
     \item \textbf{Ley de Amdahl en la práctica}: Con datos grayscale (2.7 MB, $\sim$350 KB/hilo), la fracción serial dominaba y el speedup era 0.82x. Con RGB (8 MB, $\sim$1 MB/hilo), la fracción paralela domina, alcanzando \textbf{3.89x}---demostrando que el speedup depende de la relación trabajo-útil/overhead.
 
     \item \textbf{De speedup negativo a positivo}: La evolución de 0.82x $\rightarrow$ 3.89x ilustra que el paralelismo no es automático: requiere (1) suficiente volumen de datos, (2) mínima sincronización en el hot path, y (3) creación eficiente de hilos. Este proyecto demostró los tres aspectos con evidencia cuantitativa.
+
+    \item \textbf{Syscalls y transición de modo}: Cada operación de alto nivel (malloc, fopen, pthread\_create) genera una \textit{trap} que transfiere el control del User Mode al Kernel Mode. La instrumentación reveló que un programa simple de compresión realiza decenas de syscalls distribuidas en fases (INIT, COMPRESS, DECOMPRESS, OUTPUT), y que en la versión paralela se agregan syscalls específicas del kernel Mach (\texttt{bsdthread\_create}, \texttt{thread\_info}).
+
+    \item \textbf{Heap y fragmentación interna}: Usando \texttt{malloc\_size()} de macOS se demostró que el allocator asigna más memoria de la solicitada (alineamiento a 16/32 bytes). La fragmentación interna---diferencia entre bytes solicitados y realmente asignados---es un costo oculto que afecta la eficiencia de memoria.
+
+    \item \textbf{Context switches e interrupciones}: Mediante \texttt{getrusage()} se midieron context switches voluntarios (causados por \texttt{pthread\_join}) e involuntarios (quantum del scheduler). La versión paralela genera más context switches por la sincronización entre 8 hilos, pero el throughput neto sigue siendo superior.
 \end{enumerate}
 \section{Anexos}
 % ════════════════════════════════════════════════════════════════════
