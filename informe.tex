@@ -23,7 +23,6 @@
 \usepackage{tcolorbox}
 \usepackage{float}
 \usepackage{parskip}
-\usepackage{bytefield}
 \graphicspath{{captures/}}
 
 % ─── Configuración de página ───
@@ -34,10 +33,10 @@
 % ─── Colores personalizados ───
 \definecolor{codebackground}{RGB}{245,245,245}
 \definecolor{codeborder}{RGB}{200,200,200}
-\definecolor{stackcolor}{RGB}{255,230,230}
-\definecolor{heapcolor}{RGB}{230,255,230}
-\definecolor{datacolor}{RGB}{230,230,255}
-\definecolor{codeareacolor}{RGB}{255,255,230}
+\definecolor{promptbg}{RGB}{230,243,255}
+\definecolor{promptborder}{RGB}{66,133,244}
+\definecolor{agentbg}{RGB}{232,245,233}
+\definecolor{agentborder}{RGB}{76,175,80}
 \definecolor{keywordcolor}{RGB}{0,0,180}
 \definecolor{stringcolor}{RGB}{163,21,21}
 \definecolor{commentcolor}{RGB}{0,128,0}
@@ -68,6 +67,40 @@
              {Ú}{{\'U}}1 {Ñ}{{\~N}}1
 }
 
+\lstdefinestyle{bashstyle}{
+    language=bash,
+    basicstyle=\ttfamily\scriptsize,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    stringstyle=\color{stringcolor},
+    commentstyle=\color{commentcolor}\itshape,
+    backgroundcolor=\color{codebackground},
+    frame=single,
+    rulecolor=\color{codeborder},
+    breaklines=true,
+    tabsize=4,
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    xleftmargin=15pt,
+    framexleftmargin=15pt,
+    captionpos=b,
+}
+
+\lstdefinestyle{makestyle}{
+    language=make,
+    basicstyle=\ttfamily\scriptsize,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    commentstyle=\color{commentcolor}\itshape,
+    backgroundcolor=\color{codebackground},
+    frame=single,
+    rulecolor=\color{codeborder},
+    breaklines=true,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+}
+
 \lstdefinestyle{outputstyle}{
     basicstyle=\ttfamily\scriptsize,
     backgroundcolor=\color{black!5},
@@ -80,13 +113,37 @@
     framexleftmargin=10pt,
 }
 
+% ─── Cajas para prompts y respuestas del agente ───
+\newtcolorbox{promptbox}[1][]{
+    colback=promptbg,
+    colframe=promptborder,
+    fonttitle=\bfseries,
+    title={\small Prompt del Usuario},
+    #1
+}
+
+\newtcolorbox{agentbox}[1][]{
+    colback=agentbg,
+    colframe=agentborder,
+    fonttitle=\bfseries,
+    title={\small Acción del Agente (Claude Code)},
+    #1
+}
+
+\newtcolorbox{infobox}[1][]{
+    colback=yellow!5,
+    colframe=orange!70,
+    fonttitle=\bfseries,
+    #1
+}
+
 % ─── Configuración de hyperref ───
 \hypersetup{
     colorlinks=true,
     linkcolor=sectionblue,
     urlcolor=sectionblue,
     citecolor=sectionblue,
-    pdftitle={Compresión RLE: Análisis de Procesos e Hilos},
+    pdftitle={Compresión RLE: Secuencial vs Paralelo — Informe del Proyecto},
     pdfauthor={Proyecto de Sistemas Operativos}
 }
 
@@ -98,7 +155,8 @@
 % ─── Header y footer ───
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textit{Compresión RLE: Procesos e Hilos}}
+\setlength{\headheight}{14pt}
+\fancyhead[L]{\small\textit{Compresión RLE: Secuencial vs Paralelo}}
 \fancyhead[R]{\small\textit{Sistemas Operativos}}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -112,34 +170,35 @@
 % ─── Portada ───
 \begin{titlepage}
     \centering
-    \vspace*{2cm}
 
-    {\Huge\bfseries Compresión RLE de Imágenes\\[0.3cm]}
-    {\LARGE\bfseries Análisis de Procesos e Hilos\\[0.5cm]}
-    {\Large Mapa de Memoria, Distribución de Recursos\\y Temporización de POSIX Threads}
+    \includegraphics[width=0.22\textwidth]{logo.png}\\[0.6cm]
 
-    \vspace{1.5cm}
+    {\Large\bfseries UNIVERSIDAD NACIONAL SAN ANTONIO ABAD DEL CUSCO\\}
+    {\large\bfseries DEPARTAMENTO ACADÉMICO DE INFORMÁTICA\\}
+    {\large\bfseries INGENIERÍA INFORMÁTICA Y SISTEMAS\\[1.2cm]}
 
-    \rule{\textwidth}{1pt}
+    {\LARGE\bfseries COMPRESIÓN DE IMÁGENES RLE\\[1.2cm]}
 
-    \vspace{1.5cm}
-
-    {\large\textbf{Informe Técnico de Sistemas Operativos}}
-
-    \vspace{2cm}
-
-    \begin{tabular}{rl}
-        \textbf{Plataforma:}  & macOS Darwin 25.2.0 \\
-        \textbf{CPU:}         & Apple M1 (8 cores: 4P + 4E) \\
-        \textbf{RAM:}         & 8 GB \\
-        \textbf{Lenguaje:}    & C11 con POSIX Threads \\
-        \textbf{Compilador:}  & GCC con -O2 \\
-        \textbf{Fecha:}       & \today \\
+    \begin{tabular}{@{}ll@{}}
+        \textbf{ASIGNATURA:} & Sistemas Operativos \\
+        \textbf{DOCENTE:}    & José Mauro Pillco \\
     \end{tabular}
+
+    \vspace{1.0cm}
+
+    \begin{minipage}{0.85\textwidth}
+        \textbf{ALUMNOS:}\\
+        Arapa Salazar, Marco Antonio\\
+        Bazarorda Cuellar, Héctor\\
+        Chino Choquecahua, Wilfredo\\
+        Condori Huillca, Lider\\
+        Zevallos Yanqui, Andy Jefferson
+    \end{minipage}
 
     \vfill
 
-    \rule{\textwidth}{1pt}
+    {\large Cusco -- Perú\\}
+    {\large 2025}
 \end{titlepage}
 
 % ─── Tabla de contenidos ───
@@ -147,295 +206,444 @@
 \newpage
 
 % ════════════════════════════════════════════════════════════════════
-\section{Mapa de Memoria del Proceso}
+\section{Introducción}
 % ════════════════════════════════════════════════════════════════════
 
-\subsection{Layout del Espacio de Direcciones Virtuales}
+Este documento detalla el proceso completo de desarrollo de un proyecto de Sistemas Operativos que implementa compresión de imágenes usando el algoritmo \textbf{Run-Length Encoding (RLE)} en dos versiones:
 
-Cada proceso tiene su propio espacio de direcciones virtuales. En arquitectura ARM64 (Apple M1), el espacio de usuario típicamente ocupa las direcciones bajas. El layout para nuestros programas es:
+\begin{enumerate}
+    \item \textbf{Versión secuencial:} Un único hilo de ejecución.
+    \item \textbf{Versión paralela:} Múltiples hilos con POSIX Threads (un hilo por core).
+\end{enumerate}
+
+El objetivo es demostrar de forma práctica y medible las ventajas y limitaciones de la paralelización en problemas de procesamiento de datos, comparando tiempos de ejecución, uso de CPU, memoria y la distribución del trabajo entre cores.
+
+Antes de implementar la versión paralela, se validó si el algoritmo RLE se podía paralelizar de manera efectiva: se identificó que el procesamiento por bloques (por ejemplo, por filas) es mayormente independiente y, por tanto, permite repartir el trabajo entre hilos minimizando sincronización. En este escenario, la principal ventaja esperada es reducir el \textit{wall time} aprovechando múltiples cores, manteniendo el mismo resultado comprimido que la versión secuencial.
 
 \begin{figure}[H]
-\centering
-\begin{tikzpicture}[scale=0.8]
-    % Stack
-    \draw[fill=stackcolor] (0,10) rectangle (6,11.5);
-    \node[right] at (6.2,10.75) {\texttt{0x16FDFC000} (Stack - 8 MB max)};
-    \node at (3,10.75) {\textbf{PILA (Stack)}};
-
-    % Flecha hacia abajo
-    \draw[->,thick] (3,10) -- (3,9.5);
-    \node[right] at (3.2,9.75) {\small crece $\downarrow$};
-
-    % Espacio libre
-    \draw[fill=white,dashed] (0,7) rectangle (6,9.5);
-    \node at (3,8.25) {\textit{espacio libre}};
-
-    % Heap
-    \draw[fill=heapcolor] (0,4.5) rectangle (6,7);
-    \node[right] at (6.2,5.75) {\texttt{0x600000000} (Heap - malloc)};
-    \node at (3,5.75) {\textbf{HEAP}};
-
-    % Flecha hacia arriba
-    \draw[->,thick] (3,7) -- (3,7.5);
-    \node[right] at (3.2,7.25) {\small crece $\uparrow$};
-
-    % BSS
-    \draw[fill=datacolor] (0,3.5) rectangle (6,4.5);
-    \node[right] at (6.2,4) {\texttt{0x100008000} (BSS - sin inicializar)};
-    \node at (3,4) {\textbf{BSS}};
-
-    % Data
-    \draw[fill=datacolor] (0,2.5) rectangle (6,3.5);
-    \node[right] at (6.2,3) {\texttt{0x100004000} (Data - inicializados)};
-    \node at (3,3) {\textbf{DATA}};
-
-    % Code/Text
-    \draw[fill=codeareacolor] (0,1) rectangle (6,2.5);
-    \node[right] at (6.2,1.75) {\texttt{0x100000000} (Text - código)};
-    \node at (3,1.75) {\textbf{CÓDIGO (Text)}};
-
-    % Reservado
-    \draw[fill=gray!20] (0,0) rectangle (6,1);
-    \node at (3,0.5) {\small reservado (NULL page)};
-\end{tikzpicture}
-\caption{Mapa de memoria virtual del proceso \texttt{rle\_paralelo}}
-\label{fig:memory-map}
+    \centering
+    \includegraphics[width=0.80\textwidth]{primer.png}
+    \caption{Validación inicial: análisis de paralelizabilidad del algoritmo RLE y beneficios esperados.}
+    \label{fig:validacion-inicial}
 \end{figure}
 
-\subsection{Contenido de Cada Segmento}
+\subsection{Particularidad de este informe}
 
-\begin{table}[H]
-\centering
-\caption{Segmentos de memoria y su contenido en \texttt{rle\_paralelo}}
-\begin{tabular}{@{}llp{7cm}r@{}}
-    \toprule
-    \textbf{Segmento} & \textbf{Permisos} & \textbf{Contenido} & \textbf{Tamaño} \\
-    \midrule
-    \texttt{\_\_TEXT} & R-X & Código compilado: \texttt{main()}, \texttt{rle\_thread\_func()}, \texttt{buffer\_push()}, etc. & $\sim$12 KB \\
-    \texttt{\_\_DATA} & RW- & Variables globales inicializadas, GOT, strings constantes & $\sim$4 KB \\
-    \texttt{\_\_BSS} & RW- & Variables globales sin inicializar (todas en cero) & $\sim$1 KB \\
-    \texttt{heap} & RW- & \texttt{img.data} (48 MB), \texttt{ThreadArg[8]}, buffers de salida & $\sim$52 MB \\
-    \texttt{stack} & RW- & Variables locales de \texttt{main()}, argumentos de funciones & $\sim$64 KB \\
-    \bottomrule
+Este proyecto fue desarrollado de forma interactiva con \textbf{Claude Code}, un agente de inteligencia artificial (modelo Opus 4.5) que opera como asistente de programación en línea de comandos. El informe documenta no solo el resultado final, sino \textbf{todo el proceso iterativo}: los prompts textuales proporcionados al agente, las acciones que ejecutó, las correcciones realizadas y cómo evolucionó el proyecto a lo largo de tres iteraciones principales.
+
+% ════════════════════════════════════════════════════════════════════
+\section{Metodología: Desarrollo Asistido por Agente IA}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{¿Qué es Claude Code?}
+
+Claude Code es una herramienta CLI (Command Line Interface) de Anthropic que permite interactuar con el modelo de lenguaje Claude directamente desde la terminal. El agente tiene acceso a:
+
+\begin{itemize}
+    \item \textbf{Lectura/escritura de archivos} en el sistema de archivos local.
+    \item \textbf{Ejecución de comandos} bash (compilación, ejecución, git, etc.).
+    \item \textbf{Búsqueda} en el código fuente del proyecto.
+    \item \textbf{Modo de planificación} para diseñar la arquitectura antes de implementar.
+\end{itemize}
+
+El modelo utilizado fue \texttt{claude-opus-4-5-20251101} (Opus 4.5), ejecutándose sobre macOS con un procesador Apple M1 de 8 cores.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_00.png}
+    \caption{Interfaz de Claude Code: pantalla de bienvenida con el primer prompt del proyecto y entrada al modo de planificación.}
+    \label{fig:claude-welcome}
+\end{figure}
+
+\subsection{Flujo de trabajo}
+
+El desarrollo siguió un ciclo iterativo de tres fases:
+
+\begin{center}
+\begin{tabular}{|c|l|l|}
+    \hline
+    \textbf{Fase} & \textbf{Acción del usuario} & \textbf{Acción del agente} \\
+    \hline
+    1 & Prompt con requerimientos & Planificación y diseño \\
+    2 & Revisión y retroalimentación & Implementación y pruebas \\
+    3 & Solicitud de mejoras & Refactorización y documentación \\
+    \hline
 \end{tabular}
-\end{table}
-
-\subsection{Estructuras de Datos en Memoria}
-
-\subsubsection{Estructura Image (en Heap)}
-
-\begin{lstlisting}[style=cstyle, caption={Estructura Image: 16 bytes en stack, datos en heap}]
-typedef struct {
-    uint32_t width;   /* 4 bytes - offset 0 */
-    uint32_t height;  /* 4 bytes - offset 4 */
-    uint8_t *data;    /* 8 bytes - offset 8 (puntero a heap) */
-} Image;  /* Total: 16 bytes (con padding) */
-
-/* En memoria (imagen 4096x4096): */
-/* Stack:  Image img @ 0x16FDFC100 */
-/*   img.width  = 4096  @ offset 0 */
-/*   img.height = 4096  @ offset 4 */
-/*   img.data   = 0x600001000 @ offset 8 (apunta al heap) */
-/* Heap:   img.data[0..50331647] @ 0x600001000 */
-/*   Tamaño: 4096 * 4096 * 3 = 50,331,648 bytes */
-\end{lstlisting}
-
-\subsubsection{Estructura ThreadArg (Array en Heap)}
-
-\begin{lstlisting}[style=cstyle, caption={Estructura ThreadArg: argumentos para cada hilo}]
-typedef struct {
-    int thread_idx;            /*  4 bytes - indice del hilo */
-    uint64_t system_tid;       /*  8 bytes - TID del sistema */
-    const uint8_t *pixels;     /*  8 bytes - puntero a bloque de imagen */
-    size_t num_pixels;         /*  8 bytes - pixeles asignados */
-    uint32_t start_row;        /*  4 bytes - fila inicial */
-    uint32_t num_rows;         /*  4 bytes - filas asignadas */
-    Buffer result;             /* 24 bytes - buffer de salida */
-    atomic_size_t pixels_done; /*  8 bytes - progreso (atomico) */
-    double cpu_time;           /*  8 bytes - tiempo CPU consumido */
-    mach_port_t mach_thread;   /*  4 bytes - port Mach (macOS) */
-} ThreadArg;  /* Total: ~80 bytes por hilo */
-
-/* En memoria (8 hilos): */
-/* ThreadArg args[8] @ 0x6000A0000 */
-/*   args[0] @ offset 0    - hilo 0 */
-/*   args[1] @ offset 80   - hilo 1 */
-/*   ...                            */
-/*   args[7] @ offset 560  - hilo 7 */
-/* Total: 640 bytes para metadata de hilos */
-\end{lstlisting}
+\end{center}
 
 % ════════════════════════════════════════════════════════════════════
-\section{Creación y Estructura de los Hilos}
+\section{Iteración 1: Planificación y Prototipo Inicial}
 % ════════════════════════════════════════════════════════════════════
 
-\subsection{Diferencia entre Proceso e Hilo}
+\subsection{Prompt 1: El plan de implementación}
+
+El primer paso fue proporcionarle al agente un plan detallado del proyecto. Se activó el \textbf{modo de planificación} (Plan Mode) de Claude Code, que permite al agente explorar el sistema y diseñar la arquitectura antes de escribir código. Durante esta fase, el agente formuló preguntas de clarificación antes de proceder con la implementación (Figuras~\ref{fig:plan-questions} y~\ref{fig:plan-answers}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_01.png}
+    \caption{Modo de planificación: el agente pregunta sobre el formato de imágenes a soportar.}
+    \label{fig:plan-questions}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_02.png}
+    \caption{Revisión de respuestas: se seleccionó C con pthreads y soporte para ambos formatos (sintético y PPM).}
+    \label{fig:plan-answers}
+\end{figure}
+
+Una vez confirmadas las decisiones de diseño, el agente generó el plan detallado de implementación (Figura~\ref{fig:plan-output}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.80\textwidth]{cap_04.png}
+    \caption{Plan de implementación generado por el agente: estructura del proyecto, algoritmo RLE, versión secuencial y paralela.}
+    \label{fig:plan-output}
+\end{figure}
+
+\begin{promptbox}
+\small\ttfamily
+Implement the following plan:\\[0.2cm]
+\# Plan: Compresión RLE de Imágenes — Secuencial vs Paralelo\\[0.2cm]
+\#\# Resumen\\
+Crear dos programas en C que implementen compresión RLE (Run-Length Encoding) sobre imágenes:\\
+1. \textbf{rle\_secuencial.c} — Un solo hilo\\
+2. \textbf{rle\_paralelo.c} — Múltiples hilos con pthreads (uno por core disponible)\\[0.2cm]
+Ambos producirán el mismo resultado comprimido y reportarán métricas de rendimiento para comparación.\\[0.2cm]
+\#\# Archivos a crear\\
+- rle\_secuencial.c — Versión secuencial\\
+- rle\_paralelo.c — Versión paralela con pthreads\\
+- Makefile — Compilación de ambos programas\\[0.2cm]
+\#\# Diseño\\[0.1cm]
+\#\#\# Formato de imagen\\
+- Soporta lectura de archivos PPM (P6) como entrada real\\
+- Si no se proporciona archivo, genera una imagen sintética grande (4096x4096 píxeles)\\
+- Cada píxel = 3 bytes (R, G, B)\\[0.1cm]
+\#\#\# Algoritmo RLE\\
+- Recorre los píxeles secuencialmente\\
+- Si N píxeles consecutivos tienen el mismo valor RGB → almacena (count, R, G, B)\\
+- count es 1 byte (max 255)\\
+- Formato de salida: archivo .rle binario con header (ancho, alto) + datos comprimidos\\[0.1cm]
+\#\#\# Versión Secuencial\\
+- Un solo hilo procesa toda la imagen fila por fila\\
+- Mide tiempo con clock\_gettime(CLOCK\_MONOTONIC)\\[0.1cm]
+\#\#\# Versión Paralela\\
+- Detecta cores con sysconf(\_SC\_NPROCESSORS\_ONLN)\\
+- Divide la imagen en N bloques de filas (1 bloque por hilo)\\
+- Cada hilo comprime su bloque en un buffer local\\
+- Hilo principal reúne (join) los resultados y concatena en el archivo final\\
+- Usa pthread\_create / pthread\_join
+\end{promptbox}
+
+\subsection{Acciones del agente: Iteración 1}
+
+\begin{agentbox}
+El agente ejecutó las siguientes acciones en paralelo:
+\begin{enumerate}
+    \item \textbf{Write} \texttt{rle\_secuencial.c} — Versión inicial (~140 líneas)
+    \item \textbf{Write} \texttt{rle\_paralelo.c} — Versión inicial (~160 líneas)
+    \item \textbf{Write} \texttt{Makefile} — Sistema de compilación
+\end{enumerate}
+Luego ejecutó:
+\begin{enumerate}[resume]
+    \item \textbf{Bash}: \texttt{make all} — Compilación (2 warnings: variable \texttt{input\_name} sin usar)
+    \item \textbf{Edit}: Corrección de ambos archivos eliminando la variable no usada
+    \item \textbf{Bash}: \texttt{make clean \&\& make all} — Recompilación limpia (0 warnings)
+    \item \textbf{Bash}: \texttt{./rle\_secuencial} y \texttt{./rle\_paralelo} — Ejecución en paralelo
+    \item \textbf{Bash}: \texttt{diff output\_secuencial.rle output\_paralelo.rle} — Verificación
+\end{enumerate}
+\end{agentbox}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_06.png}
+    \caption{El agente creando los tres archivos en paralelo y compilando. Se observan los 2 warnings iniciales que luego corrigió automáticamente.}
+    \label{fig:iter1-create}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_07.png}
+    \caption{Corrección automática de warnings: el agente eliminó la variable \texttt{input\_name} sin usar en ambos archivos y recompiló.}
+    \label{fig:iter1-fix}
+\end{figure}
+
+\subsection{Resultado de la Iteración 1}
+
+La primera versión fue funcional pero minimalista. La salida era un simple resumen de texto:
+
+\begin{lstlisting}[style=outputstyle, caption={Salida del prototipo inicial}]
+Imagen: 4096 x 4096 (50331648 bytes)
+Tamano comprimido: 264200 bytes
+Ratio de compresion: 99.5%
+Tiempo de ejecucion: 0.020019 segundos
+Hilos utilizados: 1
+\end{lstlisting}
+
+Ambas versiones produjeron archivos \texttt{.rle} \textbf{idénticos} (264,200 bytes).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_08.png}
+    \caption{Resultado de la Iteración 1: ejecución exitosa de ambos programas, verificación con \texttt{diff} y resumen del agente confirmando archivos idénticos y speedup de 2.5x.}
+    \label{fig:iter1-result}
+\end{figure}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Iteración 2: Métricas en Tiempo Real y Monitoreo por Hilo}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Prompt 2: Requerimientos de visualización avanzada}
+
+El usuario consideró que la salida básica no demostraba visualmente el paralelismo y proporcionó requerimientos más exigentes (Figura~\ref{fig:prompt2}):
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{cap_09.png}
+    \caption{Prompt 2: solicitud de métricas en tiempo real y demostración visual de uso de múltiples cores.}
+    \label{fig:prompt2}
+\end{figure}
+
+\begin{promptbox}
+\small\ttfamily
+La aplicación secuencial debe ejecutarse con UN SOLO HILO y mostrar métricas de rendimiento como tiempo de ejecución, uso de CPU y memoria en tiempo real.\\[0.2cm]
+La aplicación paralela debe implementar el mismo algoritmo usando MÚLTIPLES HILOS (uno por core disponible), mostrando información detallada de cada hilo: ID del hilo, core asignado, progreso individual, uso de recursos por hilo y distribución del trabajo.\\[0.2cm]
+Ambas aplicaciones deben resolver exactamente el mismo problema con los mismos datos de entrada para permitir una comparación válida del rendimiento y \textbf{demostrar visualmente que se están utilizando múltiples cores simultáneamente}.
+\end{promptbox}
+
+\subsection{Acciones del agente: Iteración 2}
+
+\begin{agentbox}
+El agente reescribió ambos archivos completamente, incorporando:
+
+\textbf{Nuevas dependencias del sistema:}
+\begin{itemize}
+    \item \texttt{<stdatomic.h>} — Variables atómicas C11 para comunicación lock-free
+    \item \texttt{<sys/resource.h>} — \texttt{getrusage()} para tiempos CPU
+    \item \texttt{<mach/mach.h>} — Mach APIs para RSS y CPU por hilo (macOS)
+    \item \texttt{<mach/thread\_policy.h>} — Afinidad de cores en macOS
+\end{itemize}
+
+\textbf{Nuevas funcionalidades:}
+\begin{itemize}
+    \item Hilo monitor auxiliar que refresca el display cada 80ms
+    \item Barras de progreso con caracteres ASCII (\texttt{#} y \texttt{-})
+    \item Recuadros coloreados con secuencias ANSI
+    \item Métricas por hilo: TID, core, CPU individual, progreso
+    \item Afinidad de cores con \texttt{THREAD\_AFFINITY\_POLICY}
+\end{itemize}
+
+\textbf{Acciones ejecutadas:}
+\begin{enumerate}
+    \item \textbf{Write}: 3 archivos en paralelo (secuencial, paralelo, Makefile)
+    \item \textbf{Bash}: \texttt{make clean \&\& make all} — Compilación limpia
+    \item \textbf{Bash}: \texttt{./rle\_secuencial} — Test secuencial
+    \item \textbf{Bash}: \texttt{./rle\_paralelo} — Test paralelo
+    \item \textbf{Bash}: \texttt{diff} — Verificación de archivos idénticos
+\end{enumerate}
+\end{agentbox}
+
+\subsection{Resultado de la Iteración 2}
+
+Las Figuras~\ref{fig:iter2-secuencial} y~\ref{fig:iter2-paralelo} muestran la salida real de ambos programas en la terminal. La versión paralela ahora mostraba una tabla en tiempo real con el estado de cada hilo:
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.70\textwidth]{cap_15.png}
+    \caption{Salida de la versión secuencial (Iteración 2): barra de progreso, métricas de CPU, memoria RSS y throughput en tiempo real.}
+    \label{fig:iter2-secuencial}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_16.png}
+    \caption{Salida de la versión paralela (Iteración 2): tabla con 8 hilos mostrando TID, core asignado, barras de progreso individuales, CPU por hilo, resumen final con speedup de 5.12x.}
+    \label{fig:iter2-paralelo}
+\end{figure}
+
+\begin{lstlisting}[style=outputstyle, caption={Salida de la versión paralela (Iteración 2, simplificada)}]
+  COMPRESION RLE - MODO PARALELO (8 hilos)
+
+  Hilo  TID         Core  Progreso                   CPU(ms)  Filas
+   0    0x35fe2c      0   [=========================] 100%  2.28    512
+   1    0x35fe2d      1   [=========================] 100%  2.36    512
+   2    0x35fe2e      2   [=========================] 100%  2.34    512
+   ...
+   7    0x35fe33      7   [=========================] 100%  2.22    512
+
+  Tiempo total:       0.005603 s
+  Speedup CPU:        5.31x (CPU time / wall time)
+  Hilos utilizados:   8
+\end{lstlisting}
+
+El \textbf{Speedup CPU de 5.31x} fue la evidencia clave: el tiempo total de CPU (29.7ms) superó ampliamente el wall time (5.6ms), demostrando que múltiples cores ejecutaron trabajo simultáneamente.
+
+% ════════════════════════════════════════════════════════════════════
+\section{Iteración 3: Documentación Completa y Benchmark}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Prompt 3: Documentación y análisis formal}
+
+El tercer y último prompt solicitó documentación exhaustiva y un benchmark formal (Figura~\ref{fig:prompt3}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_17.png}
+    \caption{Iteración 3: el agente reescribe \texttt{rle\_secuencial.c} con documentación exhaustiva (670+ líneas, 9 secciones).}
+    \label{fig:prompt3}
+\end{figure}
+
+\begin{promptbox}
+\small\ttfamily
+Necesito que el código fuente de ambas aplicaciones [esté] completamente funcional y bien documentado, un análisis comparativo detallado con métricas de rendimiento (tiempos de ejecución, speedup obtenido, uso de recursos) que muestre claramente el uso de múltiples cores durante la ejecución paralela, y documentación técnica que incluya instrucciones de instalación, manual de uso y conclusiones sobre cuándo es apropiado usar paralelización.
+\end{promptbox}
+
+\subsection{Acciones del agente: Iteración 3}
+
+\begin{agentbox}
+El agente realizó una reescritura completa de todo el proyecto:
+
+\textbf{Archivos creados/reescritos:}
+\begin{enumerate}
+    \item \textbf{rle\_secuencial.c} — Reescrito con ~670 líneas, 9 secciones documentadas
+    \item \textbf{rle\_paralelo.c} — Reescrito con ~760 líneas, 9 secciones documentadas
+    \item \textbf{Makefile} — Actualizado con target \texttt{benchmark}
+    \item \textbf{benchmark.sh} — \textit{Nuevo}: script de análisis comparativo automatizado
+    \item \textbf{README.md} — \textit{Nuevo}: documentación técnica completa (~310 líneas)
+\end{enumerate}
+
+\textbf{Proceso de depuración:}
+\begin{enumerate}
+    \item Primera ejecución de \texttt{benchmark.sh}: falló por uso de \texttt{local -n} (nameref de Bash 4.3+, incompatible con Bash 3.2 de macOS)
+    \item El agente identificó el error, reescribió la función \texttt{calc\_stats()} sin namerefs
+    \item Segunda ejecución de \texttt{benchmark.sh}: falló al parsear la salida con secuencias ANSI
+    \item El agente agregó función \texttt{strip\_ansi()} para limpiar colores antes de extraer datos
+    \item Tercera ejecución: benchmark completo exitoso
+\end{enumerate}
+\end{agentbox}
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{cap_19.png}
+        \caption{Primera ejecución del benchmark (falló por \texttt{local -n}).}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{cap_21.png}
+        \caption{Tercera ejecución con parseo ANSI corregido.}
+    \end{subfigure}
+    \caption{Proceso de depuración del script \texttt{benchmark.sh}: el agente corrigió errores de compatibilidad iterativamente.}
+    \label{fig:benchmark-debug}
+\end{figure}
+
+\subsection{Resultado de la Iteración 3}
+
+El benchmark de 5 iteraciones produjo los siguientes resultados (Figura~\ref{fig:benchmark-results}):
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{cap_22.png}
+    \caption{Resumen final generado por el agente: archivos del proyecto, líneas de código, métricas reportadas y resultados del benchmark.}
+    \label{fig:benchmark-results}
+\end{figure}
 
 \begin{table}[H]
 \centering
-\caption{Recursos privados vs compartidos entre proceso e hilos}
+\caption{Resultados del benchmark (Apple M1, 8 cores, imagen sintética 4096×4096)}
 \begin{tabular}{@{}lcc@{}}
     \toprule
-    \textbf{Recurso} & \textbf{Proceso (fork)} & \textbf{Hilo (pthread)} \\
+    \textbf{Métrica} & \textbf{Secuencial} & \textbf{Paralelo (8 hilos)} \\
     \midrule
-    Espacio de direcciones & Privado (copia) & \textbf{Compartido} \\
-    Segmento de código & Privado & \textbf{Compartido} \\
-    Segmento de datos & Privado & \textbf{Compartido} \\
-    Heap & Privado & \textbf{Compartido} \\
-    Stack & Privado & \textbf{Privado (1 por hilo)} \\
-    Registros CPU & Privado & \textbf{Privado} \\
-    Program Counter & Privado & \textbf{Privado} \\
-    File descriptors & Privado & \textbf{Compartido} \\
-    PID & Diferente & \textbf{Mismo PID} \\
-    TID & --- & \textbf{Diferente TID} \\
+    Tiempo promedio     & 16.577 ms & 4.851 ms \\
+    Tiempo mínimo       & 14.969 ms & 4.437 ms \\
+    Tiempo máximo       & 17.960 ms & 5.204 ms \\
+    \midrule
+    Speedup promedio    & 1.0x      & \textbf{3.41x} \\
+    Rango de speedup    & ---       & 2.87x -- 4.04x \\
+    Eficiencia          & 100\%     & 42.6\% \\
+    \midrule
+    Tamaño comprimido   & 264,200 B & 264,200 B \\
+    Ratio compresión    & 99.5\%    & 99.5\% \\
+    Archivos idénticos  & \multicolumn{2}{c}{\textbf{SÍ}} \\
     \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Pilas Independientes por Hilo}
+% ════════════════════════════════════════════════════════════════════
+\section{Análisis Técnico del Código Fuente}
+% ════════════════════════════════════════════════════════════════════
 
-Cada hilo tiene su propia pila. En macOS, el tamaño por defecto es 512 KB por hilo:
+\subsection{Estructura del código}
 
-\begin{figure}[H]
+Ambos archivos siguen la misma organización de 9 secciones:
+
+\begin{table}[H]
 \centering
-\begin{tikzpicture}[scale=0.7]
-    % Hilo principal
-    \draw[fill=stackcolor] (0,0) rectangle (2,4);
-    \node[rotate=90] at (1,2) {\textbf{Stack main}};
-    \node at (1,-0.5) {\small 0x16FDFC000};
-    \node at (1,4.5) {\small 512 KB};
+\caption{Organización del código fuente}
+\begin{tabular}{@{}clp{7cm}@{}}
+    \toprule
+    \textbf{Sección} & \textbf{Nombre} & \textbf{Contenido} \\
+    \midrule
+    1 & Estructuras de datos & \texttt{Image}, \texttt{Buffer}, \texttt{Progress}/\texttt{ThreadArg} \\
+    2 & Buffer dinámico & \texttt{buffer\_init}, \texttt{buffer\_push} con crecimiento amortizado \\
+    3 & Métricas del sistema & \texttt{get\_rss}, \texttt{get\_cpu\_times}, \texttt{get\_thread\_cpu} \\
+    4 & Lectura PPM & Parser del formato P6 con soporte de comentarios \\
+    5 & Imagen sintética & Generador de bandas horizontales deterministas \\
+    6 & Visualización & Barras de progreso Unicode, recuadros ANSI \\
+    7 & Hilo monitor & Refresco periódico del display (80ms) \\
+    8 & Compresión RLE & Algoritmo principal con progreso atómico \\
+    9 & Función principal & Orquestación del flujo completo \\
+    \bottomrule
+\end{tabular}
+\end{table}
 
-    % Hilos 0-7
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\x}{3 + \i * 1.5}
-        \draw[fill=stackcolor!70] (\x,0) rectangle (\x+1,3);
-        \node at (\x+0.5,1.5) {\tiny T\i};
-        \node at (\x+0.5,-0.5) {\tiny \pgfmathparse{int(112 + \i * 8)}\pgfmathresult};
+\subsection{Algoritmo RLE}
+
+El algoritmo Run-Length Encoding recorre los píxeles secuencialmente, identificando runs de colores consecutivos:
+
+\begin{lstlisting}[style=cstyle, caption={Algoritmo RLE (extracto simplificado)}]
+while (i < num_pixels) {
+    /* Obtener color del pixel actual */
+    uint8_t r = pixels[i * 3];
+    uint8_t g = pixels[i * 3 + 1];
+    uint8_t b = pixels[i * 3 + 2];
+
+    /* Contar pixeles consecutivos con el mismo color */
+    uint8_t count = 1;
+    while (i + count < num_pixels && count < 255 &&
+           pixels[(i + count) * 3]     == r &&
+           pixels[(i + count) * 3 + 1] == g &&
+           pixels[(i + count) * 3 + 2] == b) {
+        count++;
     }
 
-    % Etiquetas
-    \node at (1,5.5) {\textbf{Hilo Principal}};
-    \node at (9,5.5) {\textbf{Hilos de Trabajo (pthread)}};
+    /* Escribir run: [count, R, G, B] = 4 bytes */
+    uint8_t run[4] = { count, r, g, b };
+    buffer_push(out, run, 4);
+    i += count;
 
-    % Heap compartido
-    \draw[fill=heapcolor] (0,-3) rectangle (15,-1.5);
-    \node at (7.5,-2.25) {\textbf{HEAP COMPARTIDO} (img.data, ThreadArg[], buffers)};
-\end{tikzpicture}
-\caption{Cada hilo tiene su propia pila; el heap es compartido}
-\label{fig:thread-stacks}
-\end{figure}
-
-\subsection{Llamada a pthread\_create}
-
-\begin{lstlisting}[style=cstyle, caption={Creación de hilos con pthread\_create}]
-/* En main(): */
-pthread_t threads[8];     /* 8 identificadores de hilo */
-ThreadArg args[8];        /* 8 estructuras de argumentos */
-
-for (int i = 0; i < 8; i++) {
-    /* Configurar argumentos del hilo i */
-    args[i].thread_idx = i;
-    args[i].pixels = img.data + row_offset * width * 3;
-    args[i].num_pixels = rows_per_thread * width;
-    args[i].start_row = row_offset;
-    args[i].num_rows = 512;  /* 4096/8 filas por hilo */
-
-    /* SYSCALL: crear hilo */
-    /* El kernel asigna: nuevo TID, nueva pila (512KB), registros */
-    int ret = pthread_create(
-        &threads[i],       /* OUT: identificador del hilo */
-        NULL,              /* atributos por defecto */
-        rle_thread_func,   /* funcion a ejecutar */
-        &args[i]           /* argumento (puntero a ThreadArg) */
-    );
+    /* Actualizar progreso atomico (lock-free) */
+    atomic_store(&prog->pixels_processed, i);
 }
 \end{lstlisting}
 
-\subsection{Estado del Hilo en el Kernel}
+\textbf{Complejidad:} $O(n)$ donde $n$ = número de píxeles. Cada píxel se examina exactamente una vez.
 
-Cuando se crea un hilo, el kernel (XNU en macOS) crea una estructura \texttt{thread\_t}:
+\subsection{Estrategia de paralelización}
 
-\begin{lstlisting}[style=cstyle, caption={Información del hilo en el kernel (simplificado)}]
-/* Estructura del kernel (XNU) por cada hilo: */
-struct thread {
-    uint64_t        thread_id;      /* TID unico en el sistema */
-    task_t          task;           /* Proceso padre */
-    vm_address_t    stack_base;     /* Base de la pila */
-    vm_size_t       stack_size;     /* Tamaño de pila (512 KB) */
-    arm_context_t   machine;        /* Registros: x0-x30, sp, pc, cpsr */
-    int             sched_pri;      /* Prioridad de scheduling */
-    int             cpu_id;         /* Core actual (-1 si no asignado) */
-    uint64_t        user_time;      /* Tiempo CPU en modo usuario */
-    uint64_t        system_time;    /* Tiempo CPU en modo kernel */
-    thread_state_t  state;          /* RUNNING, WAITING, STOPPED */
-};
-\end{lstlisting}
+La imagen se divide en $N$ bloques horizontales de filas, donde $N$ = número de cores:
 
-% ════════════════════════════════════════════════════════════════════
-\section{Distribución del Trabajo entre Hilos}
-% ════════════════════════════════════════════════════════════════════
-
-\subsection{Partición de la Imagen}
-
-La imagen de 4096$\times$4096 píxeles se divide horizontalmente en 8 bloques de 512 filas cada uno:
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[scale=0.6]
-    % Imagen completa
-    \draw[thick] (0,0) rectangle (8,8);
-
-    % Divisiones horizontales
-    \foreach \i in {1,...,7} {
-        \draw[dashed] (0,\i) -- (8,\i);
-    }
-
-    % Etiquetas de bloques
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\y}{7.5 - \i}
-        \node at (4,\y) {Hilo \i: filas \pgfmathparse{int(\i*512)}\pgfmathresult--\pgfmathparse{int((\i+1)*512-1)}\pgfmathresult};
-    }
-
-    % Dimensiones
-    \draw[<->] (-0.5,0) -- (-0.5,8);
-    \node[rotate=90] at (-1,4) {4096 px};
-    \draw[<->] (0,-0.5) -- (8,-0.5);
-    \node at (4,-1) {4096 px};
-
-    % Tabla de asignación
-    \node[anchor=west] at (10,7) {\textbf{Hilo 0:} 0x600001000, 2,097,152 px};
-    \node[anchor=west] at (10,6) {\textbf{Hilo 1:} 0x600601000, 2,097,152 px};
-    \node[anchor=west] at (10,5) {\textbf{Hilo 2:} 0x600C01000, 2,097,152 px};
-    \node[anchor=west] at (10,4) {\textbf{Hilo 3:} 0x601201000, 2,097,152 px};
-    \node[anchor=west] at (10,3) {\textbf{Hilo 4:} 0x601801000, 2,097,152 px};
-    \node[anchor=west] at (10,2) {\textbf{Hilo 5:} 0x601E01000, 2,097,152 px};
-    \node[anchor=west] at (10,1) {\textbf{Hilo 6:} 0x602401000, 2,097,152 px};
-    \node[anchor=west] at (10,0) {\textbf{Hilo 7:} 0x602A01000, 2,097,152 px};
-\end{tikzpicture}
-\caption{División de la imagen: cada hilo procesa 512 filas = 6,291,456 bytes}
-\label{fig:image-partition}
-\end{figure}
-
-\subsection{Código de División}
-
-\begin{lstlisting}[style=cstyle, caption={Algoritmo de distribución de filas entre hilos}]
-uint32_t rows_per = img.height / num_threads;  /* 4096/8 = 512 */
-uint32_t extra = img.height % num_threads;     /* 4096%8 = 0 */
+\begin{lstlisting}[style=cstyle, caption={División del trabajo entre hilos}]
+uint32_t rows_per = img.height / num_threads;
+uint32_t extra = img.height % num_threads;
 uint32_t row_off = 0;
 
 for (int i = 0; i < num_threads; i++) {
-    /* Si hay residuo, los primeros hilos reciben 1 fila extra */
+    /* Los primeros hilos reciben 1 fila extra si hay residuo */
     uint32_t rows = rows_per + (i < (int)extra ? 1 : 0);
-
-    /* Calcular puntero al inicio del bloque */
-    /* Cada fila = width * 3 bytes = 4096 * 3 = 12,288 bytes */
     args[i].pixels = img.data + (size_t)row_off * img.width * 3;
-
-    /* Ejemplo hilo 3: */
-    /*   row_off = 1536 (filas 0-1535 ya asignadas) */
-    /*   offset = 1536 * 4096 * 3 = 18,874,368 bytes */
-    /*   args[3].pixels = 0x600001000 + 18,874,368 = 0x601201000 */
-
     args[i].num_pixels = (size_t)rows * img.width;
     args[i].start_row = row_off;
     args[i].num_rows = rows;
@@ -443,395 +651,585 @@ for (int i = 0; i < num_threads; i++) {
 }
 \end{lstlisting}
 
-\subsection{Tabla de Asignación Real}
+\textbf{Características clave de la paralelización:}
 
-\begin{table}[H]
-\centering
-\caption{Distribución exacta de recursos por hilo (imagen 4096$\times$4096)}
-\begin{tabular}{@{}crrrrrr@{}}
-    \toprule
-    \textbf{Hilo} & \textbf{TID} & \textbf{Filas} & \textbf{Píxeles} & \textbf{Bytes entrada} & \textbf{Offset} & \textbf{Buffer salida} \\
-    \midrule
-    0 & 0x3616a7 & 0--511    & 2,097,152 & 6,291,456 & 0x0        & 33,024 B \\
-    1 & 0x3616a8 & 512--1023  & 2,097,152 & 6,291,456 & 0x600000   & 33,024 B \\
-    2 & 0x3616a9 & 1024--1535 & 2,097,152 & 6,291,456 & 0xC00000   & 33,024 B \\
-    3 & 0x3616aa & 1536--2047 & 2,097,152 & 6,291,456 & 0x1200000  & 33,024 B \\
-    4 & 0x3616ab & 2048--2559 & 2,097,152 & 6,291,456 & 0x1800000  & 33,024 B \\
-    5 & 0x3616ac & 2560--3071 & 2,097,152 & 6,291,456 & 0x1E00000  & 33,024 B \\
-    6 & 0x3616ad & 3072--3583 & 2,097,152 & 6,291,456 & 0x2400000  & 33,024 B \\
-    7 & 0x3616ae & 3584--4095 & 2,097,152 & 6,291,456 & 0x2A00000  & 33,024 B \\
-    \midrule
-    \textbf{Total} & --- & 4096 & 16,777,216 & 50,331,648 & --- & 264,192 B \\
-    \bottomrule
-\end{tabular}
-\end{table}
+\begin{itemize}
+    \item \textbf{Sin mutex ni semáforos}: Cada hilo trabaja sobre datos disjuntos con buffer propio.
+    \item \textbf{Comunicación lock-free}: Solo \texttt{atomic\_store}/\texttt{atomic\_load} para progreso (~1ns por operación).
+    \item \textbf{Afinidad de cores}: En macOS, \texttt{THREAD\_AFFINITY\_POLICY} sugiere al scheduler distribuir hilos en cores diferentes.
+    \item \textbf{Merge ordenado}: Tras el join, los buffers se concatenan en orden para producir un archivo idéntico al secuencial.
+\end{itemize}
 
-% ════════════════════════════════════════════════════════════════════
-\section{Temporización y Scheduling de Hilos}
-% ════════════════════════════════════════════════════════════════════
+\subsection{Métricas del sistema}
 
-\subsection{Línea de Tiempo de Ejecución}
+\subsubsection{Memoria RSS (Resident Set Size)}
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[scale=0.9]
-    % Eje de tiempo
-    \draw[->,thick] (0,0) -- (14,0);
-    \node at (14.5,0) {t (ms)};
-
-    % Marcas de tiempo
-    \foreach \t in {0,1,2,3,4,5} {
-        \draw (\t*2.5,0.1) -- (\t*2.5,-0.1);
-        \node at (\t*2.5,-0.4) {\t};
-    }
-
-    % Hilo principal
-    \draw[fill=blue!30] (0,1) rectangle (0.3,1.4);
-    \node[left] at (0,1.2) {\small main};
-    \draw[fill=blue!30] (12,1) rectangle (12.5,1.4);
-    \draw[dashed] (0.3,1.2) -- (12,1.2);
-    \node[above] at (0.15,1.4) {\tiny setup};
-    \node[above] at (12.25,1.4) {\tiny merge};
-
-    % Hilos de trabajo
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\y}{2 + \i * 0.5}
-        \pgfmathsetmacro{\start}{0.3 + \i * 0.02}
-        \pgfmathsetmacro{\len}{11.5 - \i * 0.3}
-        \draw[fill=green!40] (\start,\y) rectangle (\start+\len,\y+0.35);
-        \node[left] at (0,\y+0.175) {\tiny T\i};
-    }
-
-    % Eventos
-    \draw[red,thick,->] (0.3,0.5) -- (0.3,5.5);
-    \node[red,above] at (0.3,5.5) {\small pthread\_create()};
-
-    \draw[red,thick,->] (12,0.5) -- (12,5.5);
-    \node[red,above] at (12,5.5) {\small pthread\_join()};
-
-    % Leyenda
-    \node at (7,-1.5) {\textbf{Wall time total: 5.0 ms}};
-    \node at (7,-2) {\small CPU time total: 29.7 ms (suma de todos los hilos)};
-    \node at (7,-2.5) {\small Speedup = 29.7 / 5.0 = \textbf{5.94x}};
-\end{tikzpicture}
-\caption{Diagrama de Gantt: los 8 hilos ejecutan en paralelo}
-\label{fig:gantt}
-\end{figure}
-
-\subsection{Métricas de Tiempo por Hilo (Ejecución Real)}
-
-\begin{table}[H]
-\centering
-\caption{Tiempo CPU por hilo medido con \texttt{thread\_info(THREAD\_BASIC\_INFO)}}
-\begin{tabular}{@{}crrrrl@{}}
-    \toprule
-    \textbf{Hilo} & \textbf{Core} & \textbf{user\_time} & \textbf{sys\_time} & \textbf{CPU total} & \textbf{Estado final} \\
-    \midrule
-    0 & 0 & 4.26 ms & 0.00 ms & 4.26 ms & TERMINATED \\
-    1 & 1 & 4.81 ms & 0.00 ms & 4.81 ms & TERMINATED \\
-    2 & 2 & 4.10 ms & 0.00 ms & 4.10 ms & TERMINATED \\
-    3 & 3 & 4.79 ms & 0.00 ms & 4.79 ms & TERMINATED \\
-    4 & 4 & 5.18 ms & 0.00 ms & 5.18 ms & TERMINATED \\
-    5 & 5 & 4.96 ms & 0.00 ms & 4.96 ms & TERMINATED \\
-    6 & 6 & 4.21 ms & 0.00 ms & 4.21 ms & TERMINATED \\
-    7 & 7 & 4.95 ms & 0.00 ms & 4.95 ms & TERMINATED \\
-    \midrule
-    \multicolumn{4}{r}{\textbf{Suma CPU:}} & \textbf{37.26 ms} & \\
-    \multicolumn{4}{r}{\textbf{Wall time:}} & \textbf{6.28 ms} & \\
-    \multicolumn{4}{r}{\textbf{Speedup:}} & \textbf{5.93x} & \\
-    \bottomrule
-\end{tabular}
-\end{table}
-
-\textbf{Prueba de paralelismo real:} La suma de tiempos CPU (37.26 ms) es 5.93$\times$ mayor que el wall time (6.28 ms). Esto es imposible en ejecución secuencial y demuestra que múltiples cores ejecutaron trabajo simultáneamente.
-
-\subsection{Afinidad de Cores (macOS)}
-
-\begin{lstlisting}[style=cstyle, caption={Configuración de afinidad con THREAD\_AFFINITY\_POLICY}]
+\begin{lstlisting}[style=cstyle, caption={Obtención de memoria RSS en macOS y Linux}]
+static size_t get_rss(void) {
 #ifdef __APPLE__
-/* Después de crear el hilo, configurar afinidad */
-thread_affinity_policy_data_t policy;
-policy.affinity_tag = i + 1;  /* Tag unico por hilo (0 = sin preferencia) */
-
-kern_return_t kr = thread_policy_set(
-    args[i].mach_thread,           /* Port Mach del hilo */
-    THREAD_AFFINITY_POLICY,        /* Tipo de politica */
-    (thread_policy_t)&policy,      /* Datos de la politica */
-    THREAD_AFFINITY_POLICY_COUNT   /* Tamaño de los datos */
-);
-
-/* El kernel intenta ejecutar hilos con tags diferentes */
-/* en cores diferentes. Es una "sugerencia", no garantia. */
+    /* macOS: Mach API */
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) == KERN_SUCCESS)
+        return info.resident_size;
+#else
+    /* Linux: /proc/self/statm */
+    FILE *f = fopen("/proc/self/statm", "r");
+    long pages;
+    fscanf(f, "%*d %ld", &pages);
+    fclose(f);
+    return (size_t)pages * sysconf(_SC_PAGESIZE);
 #endif
-\end{lstlisting}
-
-% ════════════════════════════════════════════════════════════════════
-\section{Capturas del Sistema en Ejecución}
-% ════════════════════════════════════════════════════════════════════
-
-\subsection{Inicio del Desarrollo con Claude Code}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{cap_00.png}
-    \caption{Interfaz de Claude Code: prompt inicial solicitando dos programas (secuencial y paralelo) con compresión RLE.}
-    \label{fig:cap00}
-\end{figure}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{cap_04.png}
-    \caption{Plan de implementación: estructura del proyecto, algoritmo RLE, estrategia de paralelización con división por bloques de filas.}
-    \label{fig:cap04}
-\end{figure}
-
-\subsection{Creación de Archivos y Compilación}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{cap_06.png}
-    \caption{El agente crea los 3 archivos (\texttt{rle\_secuencial.c}, \texttt{rle\_paralelo.c}, \texttt{Makefile}) y compila. Se muestran las estructuras de datos y los includes necesarios.}
-    \label{fig:cap06}
-\end{figure}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{cap_07.png}
-    \caption{Corrección de warnings: se eliminan variables no usadas (\texttt{input\_name}) mostrando el diff exacto de los cambios.}
-    \label{fig:cap07}
-\end{figure}
-
-\subsection{Ejecución y Verificación de Resultados}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{cap_08.png}
-    \caption{Primera ejecución: ambos programas producen archivos \texttt{.rle} idénticos (264,200 bytes). Verificación con \texttt{diff}.}
-    \label{fig:cap08}
-\end{figure}
-
-\subsection{Salida de la Versión Secuencial}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.7\textwidth]{cap_15.png}
-    \caption{Ejecución secuencial: un solo hilo procesa 16,777,216 píxeles. Tiempo: 0.014664s, CPU: 0.037343s, Throughput: 547.3 MB/s, RSS: 50.1 MB}
-    \label{fig:cap15}
-\end{figure}
-
-\subsection{Salida de la Versión Paralela con Detalle por Hilo}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.95\textwidth]{cap_16.png}
-    \caption{Ejecución paralela (8 hilos): tabla con TID, core, progreso, CPU(ms), filas y bytes comprimidos por hilo. Speedup: 5.12x. Tiempo total: 0.010431s.}
-    \label{fig:cap16}
-\end{figure}
-
-La Figura~\ref{fig:cap16} muestra la información clave del sistema operativo:
-
-\begin{itemize}
-    \item \textbf{TID por hilo}: Cada hilo tiene un Thread ID único asignado por el kernel (0x3616a7, 0x3616a8, ...).
-    \item \textbf{Core asignado}: Cada hilo se ejecuta en un core diferente (0--7).
-    \item \textbf{CPU individual}: Tiempo de CPU consumido por cada hilo, medido con Mach API.
-    \item \textbf{Distribución equitativa}: Cada hilo procesa exactamente 512 filas = 2,097,152 píxeles.
-\end{itemize}
-
-\subsection{Benchmark Final}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{cap_22.png}
-    \caption{Resumen del benchmark (5 iteraciones): Secuencial 16.6 ms vs Paralelo 4.9 ms. Speedup promedio: 3.41x.}
-    \label{fig:cap22}
-\end{figure}
-
-% ════════════════════════════════════════════════════════════════════
-\section{APIs del Sistema Operativo Utilizadas}
-% ════════════════════════════════════════════════════════════════════
-
-\subsection{POSIX Threads (pthreads)}
-
-\begin{table}[H]
-\centering
-\caption{Funciones pthread utilizadas}
-\begin{tabular}{@{}lp{8cm}@{}}
-    \toprule
-    \textbf{Función} & \textbf{Descripción} \\
-    \midrule
-    \texttt{pthread\_create()} & Crea un nuevo hilo. El kernel asigna TID, pila (512 KB), y estructura de control. \\
-    \texttt{pthread\_join()} & Bloquea hasta que el hilo termine. Libera recursos del hilo. \\
-    \texttt{pthread\_self()} & Retorna el identificador del hilo actual. \\
-    \texttt{pthread\_threadid\_np()} & (macOS) Obtiene el TID nativo del sistema. \\
-    \texttt{pthread\_mach\_thread\_np()} & (macOS) Obtiene el port Mach del hilo para APIs de kernel. \\
-    \bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Mach APIs (macOS)}
-
-\begin{table}[H]
-\centering
-\caption{APIs Mach para métricas del sistema}
-\begin{tabular}{@{}lp{7cm}@{}}
-    \toprule
-    \textbf{Función} & \textbf{Uso en el programa} \\
-    \midrule
-    \texttt{task\_info(MACH\_TASK\_BASIC\_INFO)} & Obtener RSS (memoria física) del proceso. \\
-    \texttt{thread\_info(THREAD\_BASIC\_INFO)} & Obtener tiempo CPU (user+sys) por hilo individual. \\
-    \texttt{thread\_policy\_set(THREAD\_AFFINITY\_POLICY)} & Sugerir al scheduler que distribuya hilos en cores diferentes. \\
-    \texttt{mach\_task\_self()} & Obtener el port Mach del proceso actual. \\
-    \bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Otras APIs del Sistema}
-
-\begin{table}[H]
-\centering
-\caption{APIs POSIX y del sistema}
-\begin{tabular}{@{}lp{7cm}@{}}
-    \toprule
-    \textbf{Función} & \textbf{Uso} \\
-    \midrule
-    \texttt{sysconf(\_SC\_NPROCESSORS\_ONLN)} & Detectar número de cores disponibles. \\
-    \texttt{clock\_gettime(CLOCK\_MONOTONIC)} & Medir wall time con precisión de nanosegundos. \\
-    \texttt{getrusage(RUSAGE\_SELF)} & Obtener tiempo CPU total del proceso (user + system). \\
-    \texttt{malloc()}, \texttt{realloc()} & Asignar memoria en el heap para buffers. \\
-    \bottomrule
-\end{tabular}
-\end{table}
-
-% ════════════════════════════════════════════════════════════════════
-\section{Sincronización y Comunicación entre Hilos}
-% ════════════════════════════════════════════════════════════════════
-
-\subsection{Patrón Lock-Free con Variables Atómicas}
-
-Este proyecto NO usa mutex ni semáforos. La única sincronización es mediante variables atómicas (C11 \texttt{<stdatomic.h>}):
-
-\begin{lstlisting}[style=cstyle, caption={Comunicación lock-free entre hilo de trabajo y monitor}]
-/* En ThreadArg: */
-atomic_size_t pixels_done;  /* Variable atomica */
-
-/* Hilo de trabajo (productor): */
-while (i < num_pixels) {
-    /* ... procesar pixeles ... */
-    i += count;
-
-    /* Escritura atomica (1 instruccion ARM: str) */
-    atomic_store(&ta->pixels_done, i);
-}
-
-/* Hilo monitor (consumidor): */
-while (!done) {
-    for (int i = 0; i < num_threads; i++) {
-        /* Lectura atomica (1 instruccion ARM: ldr) */
-        size_t progress = atomic_load(&args[i].pixels_done);
-        /* Mostrar barra de progreso... */
-    }
-    usleep(80000);  /* Refrescar cada 80ms */
 }
 \end{lstlisting}
 
-\textbf{Por qué funciona sin mutex:}
-\begin{itemize}
-    \item Cada hilo escribe SOLO en su propio \texttt{pixels\_done}.
-    \item El monitor SOLO lee (nunca escribe).
-    \item Las operaciones atómicas garantizan visibilidad entre cores.
-    \item No hay condiciones de carrera porque no hay escrituras compartidas.
-\end{itemize}
+\subsubsection{CPU por hilo individual}
 
-\subsection{Independencia de Datos}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[scale=0.8]
-    % Imagen en heap
-    \draw[fill=heapcolor] (0,0) rectangle (12,2);
-    \node at (6,1) {\textbf{img.data} (heap compartido, solo lectura)};
-
-    % Bloques de cada hilo
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\x}{\i * 1.5}
-        \draw[thick] (\x,0) -- (\x,2);
-        \node at (\x+0.75,2.3) {\tiny H\i};
+\begin{lstlisting}[style=cstyle, caption={Tiempo CPU por hilo vía Mach API (macOS)}]
+static double get_thread_cpu(ThreadArg *ta) {
+    thread_basic_info_data_t info;
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(ta->mach_thread, THREAD_BASIC_INFO,
+                    (thread_info_t)&info, &count) == KERN_SUCCESS) {
+        return info.user_time.seconds + info.user_time.microseconds / 1e6 +
+               info.system_time.seconds + info.system_time.microseconds / 1e6;
     }
+    return 0;
+}
+\end{lstlisting}
 
-    % Flechas de lectura
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\x}{\i * 1.5 + 0.75}
-        \draw[->,thick,blue] (\x,3) -- (\x,2.1);
-    }
-
-    % Buffers de salida
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\x}{\i * 1.5}
-        \draw[fill=stackcolor] (\x,4) rectangle (\x+1.4,5);
-        \node at (\x+0.7,4.5) {\tiny buf[\i]};
-    }
-
-    % Flechas de escritura
-    \foreach \i in {0,...,7} {
-        \pgfmathsetmacro{\x}{\i * 1.5 + 0.75}
-        \draw[->,thick,red] (\x,3.1) -- (\x,3.9);
-    }
-
-    % Leyenda
-    \node[blue] at (14,3) {\small lectura};
-    \node[red] at (14,3.5) {\small escritura};
-
-    % Etiquetas
-    \node at (6,-0.5) {\small Cada hilo lee de su región, escribe en su buffer};
-\end{tikzpicture}
-\caption{Sin escrituras compartidas = sin necesidad de locks}
-\label{fig:data-independence}
-\end{figure}
+Esta función es crucial para demostrar que múltiples hilos consumen CPU \textbf{simultáneamente}: si la suma de tiempos CPU de todos los hilos supera el wall time, hay paralelismo real.
 
 % ════════════════════════════════════════════════════════════════════
-\section{Análisis de Rendimiento}
+\section{Análisis Comparativo de Rendimiento}
 % ════════════════════════════════════════════════════════════════════
 
-\subsection{Resultados del Benchmark}
+\subsection{Entorno de pruebas}
 
 \begin{table}[H]
 \centering
-\caption{Comparación secuencial vs paralelo (promedio de 5 ejecuciones)}
-\begin{tabular}{@{}lrrr@{}}
+\caption{Especificaciones del sistema de pruebas}
+\begin{tabular}{@{}ll@{}}
     \toprule
-    \textbf{Métrica} & \textbf{Secuencial} & \textbf{Paralelo (8 hilos)} & \textbf{Mejora} \\
+    \textbf{Componente} & \textbf{Especificación} \\
     \midrule
-    Wall time promedio & 16.577 ms & 4.851 ms & \textbf{3.41x más rápido} \\
-    CPU time total & 16.5 ms & 29.7 ms & 1.8x más CPU usado \\
-    Throughput & 564 MB/s & 1925 MB/s & 3.4x más throughput \\
-    Memoria RSS & 50.1 MB & 51.2 MB & +2\% overhead \\
-    Archivo salida & 264,200 B & 264,200 B & Idénticos \\
+    Sistema operativo & macOS (Darwin 25.2.0) \\
+    Procesador        & Apple M1 \\
+    Cores             & 8 (4 performance + 4 efficiency) \\
+    RAM               & 8 GB \\
+    Compilador        & GCC con -O2 \\
+    Imagen de prueba  & Sintética 4096×4096, bandas horizontales \\
+    Datos originales  & 50,331,648 bytes (48 MB) \\
     \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Overhead de Paralelización}
+\subsection{Tiempos de ejecución}
 
-\begin{itemize}
-    \item \textbf{Creación de hilos}: $\sim$10 $\mu$s por \texttt{pthread\_create()} = 80 $\mu$s total
-    \item \textbf{Memoria por pila}: 512 KB $\times$ 8 hilos = 4 MB adicionales
-    \item \textbf{ThreadArg array}: 80 bytes $\times$ 8 = 640 bytes
-    \item \textbf{Buffers de salida}: $\sim$33 KB $\times$ 8 = 264 KB (vs 264 KB en secuencial)
-\end{itemize}
+\begin{table}[H]
+\centering
+\caption{Tiempos de ejecución por iteración (segundos)}
+\begin{tabular}{@{}cccc@{}}
+    \toprule
+    \textbf{Iteración} & \textbf{Secuencial} & \textbf{Paralelo} & \textbf{Speedup} \\
+    \midrule
+    1 & 0.017960 & 0.005204 & 3.45x \\
+    2 & 0.017195 & 0.004923 & 3.49x \\
+    3 & 0.014969 & 0.004437 & 3.37x \\
+    4 & 0.016640 & 0.004801 & 3.46x \\
+    5 & 0.016125 & 0.004892 & 3.29x \\
+    \midrule
+    \textbf{Promedio} & \textbf{0.016578} & \textbf{0.004851} & \textbf{3.41x} \\
+    \bottomrule
+\end{tabular}
+\end{table}
 
-\subsection{Speedup vs Número de Hilos Teórico}
+\subsection{Distribución de trabajo por hilo}
 
-Con la Ley de Amdahl, si la fracción serial es $S \approx 0.02$ (2\%):
+La siguiente tabla muestra los datos de la versión paralela en una ejecución típica, donde cada hilo procesó una fracción equitativa de la imagen:
 
-\[
-\text{Speedup} = \frac{1}{S + \frac{1-S}{N}} = \frac{1}{0.02 + \frac{0.98}{8}} = \frac{1}{0.1425} = 7.02x
-\]
+\begin{table}[H]
+\centering
+\caption{Detalle por hilo (ejecución típica)}
+\begin{tabular}{@{}cccrcr@{}}
+    \toprule
+    \textbf{Hilo} & \textbf{Core} & \textbf{Filas} & \textbf{Píxeles} & \textbf{CPU (ms)} & \textbf{Comprimido (B)} \\
+    \midrule
+    0 & 0 & 512 & 2,097,152 & 2.28 & 33,024 \\
+    1 & 1 & 512 & 2,097,152 & 2.36 & 33,024 \\
+    2 & 2 & 512 & 2,097,152 & 2.34 & 33,024 \\
+    3 & 3 & 512 & 2,097,152 & 2.48 & 33,024 \\
+    4 & 4 & 512 & 2,097,152 & 3.00 & 33,024 \\
+    5 & 5 & 512 & 2,097,152 & 3.25 & 33,024 \\
+    6 & 6 & 512 & 2,097,152 & 3.06 & 33,024 \\
+    7 & 7 & 512 & 2,097,152 & 2.22 & 33,024 \\
+    \midrule
+    \textbf{Total} & --- & \textbf{4096} & \textbf{16,777,216} & \textbf{20.99} & \textbf{264,192} \\
+    \bottomrule
+\end{tabular}
+\end{table}
 
-El speedup real (3.41x) es menor debido a:
+\begin{infobox}[title={\small Evidencia de paralelismo real}]
+La suma de tiempos CPU de todos los hilos (20.99 ms) es \textbf{3.7 veces mayor} que el wall time (5.6 ms). Esto solo es posible si múltiples cores ejecutaron trabajo simultáneamente. En un modelo secuencial (time-sharing en un solo core), la suma de CPU nunca superaría al wall time.
+\end{infobox}
+
+\subsection{Análisis del speedup}
+
+El speedup obtenido (3.41x con 8 cores) está por debajo del máximo teórico (8x). Los factores que lo explican son:
+
 \begin{enumerate}
-    \item \textbf{Cores heterogéneos del M1}: 4 P-cores (rápidos) + 4 E-cores (lentos)
-    \item \textbf{Contención de memoria}: 8 hilos compiten por el bus de memoria
-    \item \textbf{Tarea muy corta}: Con solo $\sim$17ms de trabajo, el overhead de creación de hilos es significativo
+    \item \textbf{Apple M1 tiene cores heterogéneos}: 4 cores de rendimiento (P-cores) y 4 de eficiencia (E-cores). Los E-cores son más lentos, por lo que el speedup efectivo depende de cómo el scheduler distribuye los hilos. El speedup teórico ajustado considerando esta heterogeneidad es menor que 8x.
+
+    \item \textbf{Overhead de creación de hilos}: Cada \texttt{pthread\_create} tiene un costo de $\sim$10-50$\mu$s. Con 8 hilos, esto suma $\sim$80-400$\mu$s, que es significativo cuando el total es $\sim$5ms.
+
+    \item \textbf{La tarea es muy rápida}: Con solo $\sim$17ms de trabajo total, hay poco margen para amortizar el overhead de paralelización. Con imágenes más grandes, la eficiencia mejoraría.
+
+    \item \textbf{Contención de memoria}: Aunque no hay locks, los 8 hilos compiten por el bus de memoria al leer regiones diferentes de la imagen de 48 MB.
+\end{enumerate}
+
+\subsubsection{Ley de Amdahl}
+
+El speedup máximo está acotado por la fracción serial $S$ del programa:
+
+\begin{equation}
+    \text{Speedup}_{\text{max}} = \frac{1}{S + \frac{1 - S}{N}}
+\end{equation}
+
+Donde $N$ = número de cores. Para este proyecto, la parte serial incluye:
+
+\begin{itemize}
+    \item Generación de la imagen sintética (no paralelizada)
+    \item Merge de buffers al archivo (escritura secuencial)
+    \item Creación y join de hilos
+\end{itemize}
+
+Estimando $S \approx 0.01$ (1\% serial):
+
+\begin{center}
+\begin{tabular}{@{}cc@{}}
+    \toprule
+    \textbf{Cores ($N$)} & \textbf{Speedup máximo teórico} \\
+    \midrule
+    2  & 1.98x \\
+    4  & 3.88x \\
+    8  & 7.47x \\
+    16 & 13.91x \\
+    \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Uso de recursos}
+
+\begin{table}[H]
+\centering
+\caption{Comparación de uso de recursos}
+\begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Recurso} & \textbf{Secuencial} & \textbf{Paralelo} \\
+    \midrule
+    Uso de CPU          & $\sim$100\%   & $\sim$530\% \\
+    Memoria RSS         & $\sim$50 MB   & $\sim$50 MB \\
+    Throughput          & $\sim$564 MB/s & $\sim$578 MB/s\textsuperscript{*} \\
+    Resultado (bytes)   & 264,200       & 264,200 \\
+    \bottomrule
+\end{tabular}
+\\[0.3cm]
+\small\textsuperscript{*} El throughput por hilo es menor, pero el throughput global es similar porque el wall time se reduce.
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Resumen del Proceso con el Agente IA}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Cronología de interacciones}
+
+\begin{longtable}{@{}clp{6.5cm}l@{}}
+    \toprule
+    \textbf{\#} & \textbf{Tipo} & \textbf{Descripción} & \textbf{Resultado} \\
+    \midrule
+    \endhead
+    1 & Prompt & Plan detallado del proyecto con especificaciones de diseño, algoritmo y verificación & Plan aceptado \\
+    \midrule
+    2 & Agente & Creó 3 archivos en paralelo (\texttt{.c}, \texttt{.c}, \texttt{Makefile}) & 3 archivos \\
+    \midrule
+    3 & Agente & Compiló con \texttt{make all}, detectó 2 warnings & 2 warnings \\
+    \midrule
+    4 & Agente & Corrigió warnings (variable sin usar) automáticamente & 0 warnings \\
+    \midrule
+    5 & Agente & Ejecutó ambos programas y verificó con \texttt{diff} & Archivos idénticos \\
+    \midrule
+    6 & Prompt & Requerimiento de métricas en tiempo real, monitoreo por hilo, demostración visual de paralelismo & Reqs aceptados \\
+    \midrule
+    7 & Agente & Reescribió ambos programas completamente ($\sim$250 líneas $\rightarrow$ $\sim$480 líneas) incorporando atomics, Mach APIs, ANSI UI & 3 archivos \\
+    \midrule
+    8 & Agente & Compiló y ejecutó ambas versiones, verificó archivos idénticos & Speedup 5.31x \\
+    \midrule
+    9 & Prompt & Solicitud de documentación completa, análisis comparativo con benchmark, README técnico & Reqs aceptados \\
+    \midrule
+    10 & Agente & Reescribió código con documentación exhaustiva ($\sim$480 $\rightarrow$ $\sim$700+ líneas), creó \texttt{benchmark.sh} y \texttt{README.md} & 5 archivos \\
+    \midrule
+    11 & Agente & Ejecutó benchmark; falló por \texttt{local -n} incompatible con Bash 3.2 de macOS & Error \\
+    \midrule
+    12 & Agente & Corrigió el script eliminando namerefs; segunda ejecución falló por parseo ANSI & Error \\
+    \midrule
+    13 & Agente & Agregó \texttt{strip\_ansi()} al script; tercera ejecución exitosa & Benchmark OK \\
+    \midrule
+    14 & Agente & Verificó reporte generado (\texttt{reporte\_analisis.txt}) & Completo \\
+    \bottomrule
+\end{longtable}
+
+\subsection{Estadísticas del desarrollo}
+
+\begin{table}[H]
+\centering
+\caption{Métricas del proceso de desarrollo}
+\begin{tabular}{@{}lr@{}}
+    \toprule
+    \textbf{Métrica} & \textbf{Valor} \\
+    \midrule
+    Prompts del usuario     & 3 \\
+    Iteraciones del agente  & 14 acciones (herramientas) \\
+    Archivos creados        & 5 (\texttt{.c}, \texttt{.c}, \texttt{Makefile}, \texttt{.sh}, \texttt{.md}) \\
+    Líneas de código C      & $\sim$1,430 (670 + 760) \\
+    Líneas de Bash           & $\sim$220 \\
+    Líneas de documentación & $\sim$310 (README) \\
+    Errores detectados y corregidos & 4 (2 warnings, 1 incompatibilidad Bash, 1 parseo ANSI) \\
+    Compilación final       & 0 warnings, 0 errores \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_23.png}
+    \caption{Pantalla final de Claude Code mostrando los comandos rápidos del proyecto. La sesión completa tomó 9 minutos 24 segundos.}
+    \label{fig:final-session}
+\end{figure}
+
+% ════════════════════════════════════════════════════════════════════
+
+
+% ════════════════════════════════════════════════════════════════════
+\section{Visualización Detallada de Segmentos de Memoria}
+% ════════════════════════════════════════════════════════════════════
+
+Los programas fueron modificados para mostrar en tiempo de ejecución los segmentos de memoria (PILA, CÓDIGO, DATOS) con sus direcciones reales, permitiendo observar cómo el sistema operativo organiza la memoria del proceso.
+
+\subsection{Análisis Comparativo Secuencial vs Paralelo}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_26.png}
+    \caption{Tabla comparativa generada por Claude Code: diferencias en PILA (1 stack vs N+1 stacks), DATOS (buffer único vs buffers por hilo), y variables (locales vs compartidas).}
+    \label{fig:cap26}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_28.png}
+    \caption{Diagrama de memoria comparativo: la versión secuencial tiene un solo stack y buffer; la paralela tiene múltiples stacks independientes y buffers privados por hilo, pero comparte el segmento de código y la imagen de entrada.}
+    \label{fig:cap28}
+\end{figure}
+
+\subsection{Ejecución Secuencial: Segmentos en Detalle}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_29.png}
+    \caption{Versión secuencial --- \textbf{PILA}: variables locales con direcciones reales (ej. \texttt{stack\_top} @ \texttt{0x16f506adc}). \textbf{CÓDIGO}: direcciones de funciones (\texttt{main()} @ \texttt{0x1008fc290}, \texttt{rle\_compress()} @ \texttt{0x1008fd4ec}).}
+    \label{fig:cap29}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_30.png}
+    \caption{Versión secuencial --- \textbf{DATOS}: segmentos DATA (variables inicializadas como \texttt{g\_initialized\_var=42}), BSS (sin inicializar), y HEAP (\texttt{img.data} 50 MB, \texttt{compressed.data} 25 MB). Resultados: 0.024s, 99.5\% compresión.}
+    \label{fig:cap30}
+\end{figure}
+
+\subsection{Ejecución Paralela: Estado ANTES de Crear Hilos}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_31.png}
+    \caption{Versión paralela ANTES de \texttt{pthread\_create} --- \textbf{PILA}: el stack del hilo principal está activo; los 8 stacks de workers muestran estado ``Pendiente'' con direcciones \texttt{0x0} (aún no creados).}
+    \label{fig:cap31}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_32.png}
+    \caption{Versión paralela ANTES --- \textbf{DATOS}: la imagen compartida está en heap (\texttt{0x5e8000000}); los buffers por hilo muestran 0 bytes y estado ``Pendiente''. Nota: 9 hilos totales (1 main + 8 workers).}
+    \label{fig:cap32}
+\end{figure}
+
+\subsection{Ejecución Paralela: Estado DESPUÉS de Ejecutar}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_33.png}
+    \caption{Versión paralela DESPUÉS de \texttt{pthread\_join} --- \textbf{PILA}: los 8 stacks ahora muestran estado ``Activo'' con direcciones reales distintas (ej. Hilo 0: \texttt{0x16b7bef50}, Hilo 1: \texttt{0x16b84af50}) y TIDs únicos (\texttt{0x528083}--\texttt{0x52808a}).}
+    \label{fig:cap33}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_34.png}
+    \caption{Versión paralela DESPUÉS --- \textbf{DATOS/HEAP}: cada buffer por hilo ahora muestra capacidad (3,145,984 B), bytes usados (33,024 B) y estado ``Asignado''. Total buffers: 24 MB. La imagen compartida permanece sin cambios.}
+    \label{fig:cap34}
+\end{figure}
+
+\subsection{Resultados Finales de la Versión Paralela}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_35.png}
+    \caption{Resultados paralelos: distribución de trabajo (512 filas/hilo), tiempo CPU por hilo via \texttt{thread\_info} (2.3--2.5 ms cada uno), suma CPU 22.27 ms, wall time 11.6 ms. \textbf{Speedup: 1.91x}, Eficiencia: 23.9\%, Throughput: 4121 MB/s.}
+    \label{fig:cap35}
+\end{figure}
+
+\subsection{Observaciones de los Segmentos de Memoria}
+
+\begin{table}[H]
+\centering
+\caption{Comparación de segmentos entre versión secuencial y paralela}
+\begin{tabular}{@{}lp{5.5cm}p{5.5cm}@{}}
+    \toprule
+    \textbf{Segmento} & \textbf{Secuencial (1 hilo)} & \textbf{Paralelo (8 hilos)} \\
+    \midrule
+    \textbf{PILA} & 1 stack (8 MB máx) & 1 stack main + 8 stacks worker (512 KB c/u) = 12 MB \\
+    \textbf{CÓDIGO} & Funciones: \texttt{main}, \texttt{rle\_compress}, etc. & Mismo código + \texttt{rle\_thread\_func} ejecutada por 8 hilos \\
+    \textbf{DATA} & \texttt{g\_program\_name="RLE Secuencial"} & \texttt{g\_program\_name="RLE Paralelo"}, \texttt{g\_num\_threads=8} \\
+    \textbf{BSS} & \texttt{g\_total\_runs} (no atómico) & \texttt{g\_total\_runs\_atomic} (atómico para concurrencia) \\
+    \textbf{HEAP} & \texttt{img.data} + 1 buffer comprimido & \texttt{img.data} (compartido) + 8 buffers privados \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Puntos clave observados:}
+\begin{itemize}
+    \item Los stacks de los hilos worker tienen direcciones cercanas pero distintas (\texttt{0x16b7bef50}, \texttt{0x16b84af50}, ...), separadas por $\sim$512 KB.
+    \item El segmento de CÓDIGO es \textbf{compartido}: la función \texttt{rle\_thread\_func} tiene una sola dirección pero es ejecutada por 8 hilos simultáneamente.
+    \item La imagen (\texttt{img.data}) está en heap compartido y es de \textbf{solo lectura}---no requiere mutex.
+    \item Cada hilo escribe en su propio buffer privado---\textbf{sin condiciones de carrera}.
+    \item Las variables atómicas (\texttt{atomic\_size\_t}) permiten comunicación lock-free entre hilos.
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Iteración 4: Diagnóstico de Speedup Negativo y Optimización}
+% ════════════════════════════════════════════════════════════════════
+
+Esta iteración fue la más crítica del proyecto. Al ejecutar la primera versión con imagen real (unsaac.jpg, 1366$\times$2048), el resultado fue inesperado: \textbf{la versión paralela era más lenta que la secuencial} (speedup 0.82x). Mediante análisis sistemático se identificaron tres cuellos de botella y se corrigieron, alcanzando finalmente un \textbf{speedup de 3.89x}.
+
+\subsection{El Problema: Speedup $< 1.0$x (Paralelo más Lento)}
+
+Al generar el primer diagrama de Gantt con datos de PC sampling, los resultados mostraron:
+
+\begin{table}[H]
+\centering
+\caption{Resultados iniciales --- versión con escala de grises (1 canal)}
+\begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Métrica} & \textbf{Secuencial} & \textbf{Paralelo (8 hilos)} \\
+    \midrule
+    Wall time           & 13.4 ms   & 16.3 ms \\
+    Datos procesados    & 2.7 MB (grayscale) & 2.7 MB (grayscale) \\
+    Datos por hilo      & 2.7 MB    & $\sim$350 KB \\
+    \textbf{Speedup}    & ---       & \textbf{0.82x (más lento)} \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+El speedup $< 1.0$ significaba que el overhead de crear y coordinar 8 hilos superaba el beneficio del paralelismo. Esto es un fenómeno real que ocurre en sistemas operativos cuando la granularidad del trabajo es demasiado fina.
+
+\subsection{Análisis de Causas Raíz}
+
+Claude Code analizó los datos CSV de scheduling y el código fuente, identificando \textbf{tres cuellos de botella}:
+
+\begin{tcolorbox}[colback=red!5!white, colframe=red!75!black, title={\textbf{Causa 1: \texttt{usleep(1000)} en el loop de creación de hilos}}]
+El código original contenía un \texttt{usleep(1000)} (1 ms de pausa) después de cada \texttt{pthread\_create}:
+
+\begin{lstlisting}[style=cstyle, numbers=none]
+for (int i = 0; i < NUM_THREADS; i++) {
+    pthread_create(&threads[i], NULL, rle_thread_func, &args[i]);
+    usleep(1000);  // 1 ms de pausa artificial
+}
+\end{lstlisting}
+
+\textbf{Impacto}: El Hilo 0 iniciaba en $t=0$ ms, pero el Hilo 7 no iniciaba hasta $t=18$ ms. Los primeros hilos terminaban antes de que los últimos comenzaran, eliminando el paralelismo real. El diagrama de Gantt mostraba los hilos ``escalonados'' en vez de simultáneos.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white, colframe=red!75!black, title={\textbf{Causa 2: \texttt{atomic\_fetch\_add} en el hot loop de compresión}}]
+Dentro del bucle más interno de cada hilo, se incrementaba un contador atómico global:
+
+\begin{lstlisting}[style=cstyle, numbers=none]
+while (i < num_pixels) {
+    count = 1;
+    while (i + count < num_pixels && pixels[i] == pixels[i+count])
+        count++;
+    atomic_fetch_add(&g_total_runs_atomic, 1);  // CADA run
+    // ... escribir run al buffer
+}
+\end{lstlisting}
+
+\textbf{Impacto}: Cada \texttt{atomic\_fetch\_add} fuerza a los 8 cores a sincronizar su línea de caché (protocolo MESI). Con miles de runs por hilo, esto generaba \textbf{cache-line bouncing} masivo---cada core debía esperar a que los otros liberaran la línea de caché compartida, serializando efectivamente la ejecución.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white, colframe=red!75!black, title={\textbf{Causa 3: Volumen de datos insuficiente (1 canal grayscale)}}]
+La imagen se cargaba en escala de grises (1 canal): $1366 \times 2048 \times 1 = 2.7$ MB.
+
+\textbf{Impacto}: Con 8 hilos, cada uno procesaba solo $\sim$350 KB. El tiempo de procesamiento ($\sim$2 ms por hilo) era comparable al overhead de creación de hilos y sincronización, anulando cualquier beneficio del paralelismo. La Ley de Amdahl predice que con tan poco trabajo, la fracción serial domina.
+\end{tcolorbox}
+
+\subsection{Análisis Detallado de Memoria por Claude Code}
+
+Como parte del diagnóstico, Claude Code generó un análisis exhaustivo de los segmentos de memoria (IPC) comparando ambas versiones, lo que permitió identificar los puntos de contención.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_36.png}
+    \caption{Análisis IPC de Claude Code (parte 1): comparación detallada de PILA (1 stack de 8 MB vs N+1 stacks de 512 KB), DATOS (buffers privados vs compartidos), variables BSS (atómicas en paralelo), HEAP (imagen compartida read-only + buffers privados por hilo), y aspectos de sincronización.}
+    \label{fig:cap36}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_37.png}
+    \caption{Análisis IPC de Claude Code (parte 2): funciones clave y su ejecución concurrente, Program Counter independiente por hilo (cada hilo tiene su propio PC apuntando a distintas instrucciones del mismo código), acceso al núcleo---syscalls de creación (\texttt{pthread\_create} + \texttt{sysctl mmap}), scheduling (Mach API: \texttt{thread\_info}, \texttt{thread\_policy\_set}), y bloqueo (1 PID, N+1 TIDs schedulados independientemente).}
+    \label{fig:cap37}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_38.png}
+    \caption{Diagrama comparativo de memoria: la versión secuencial tiene STACK único (8 MB), TEXT (R-X), DATA+BSS (\texttt{total\_runs} sin protección), HEAP lineal, y 1 PCB/1 TID en kernel. La paralela tiene N+1 STACKs, TEXT COMPARTIDO, DATA+BSS con \texttt{atomic} (lock-free), HEAP con imagen compartida + N buffers privados, y 1 PCB + N+1 TCBs con scheduling independiente por hilo.}
+    \label{fig:cap38}
+\end{figure}
+
+\subsection{Optimizaciones Implementadas}
+
+Se aplicaron tres correcciones quirúrgicas al código:
+
+\begin{table}[H]
+\centering
+\caption{Optimizaciones aplicadas y su efecto}
+\begin{tabular}{@{}p{3.5cm}p{4cm}p{5cm}@{}}
+    \toprule
+    \textbf{Optimización} & \textbf{Cambio en código} & \textbf{Efecto en scheduling del SO} \\
+    \midrule
+    Eliminar \texttt{usleep(1000)} & Remover la pausa entre \texttt{pthread\_create} & Los 8 hilos entran en la cola \emph{ready} del scheduler casi simultáneamente (0.03--0.58 ms vs 0--18 ms antes) \\
+    \addlinespace
+    Eliminar \texttt{atomic\_fetch\_add} del hot loop & Contar runs localmente y sumar al final & Elimina cache-line bouncing entre cores; cada hilo trabaja con su propia línea de caché L1 sin invalidaciones \\
+    \addlinespace
+    Migrar a RGB (3 canales) & \texttt{stbi\_load(..., 3)} en vez de \texttt{stbi\_load(..., 1)} & Datos: $1366 \times 2048 \times 3 = 8$ MB; cada hilo procesa $\sim$1 MB, suficiente para amortizar el overhead de threading \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ejecución Post-Optimización: Versión Secuencial RGB}
+
+Con los cambios aplicados, ambos programas se recompilaron y ejecutaron con la imagen de prueba. La versión secuencial sirve como línea base para medir el speedup.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_39.png}
+    \caption{Ejecución secuencial RGB --- \textbf{PILA}: variables locales (\texttt{stack\_top}, \texttt{img}, \texttt{compressed}) con direcciones reales del proceso. \textbf{CÓDIGO}: segmento de texto con direcciones de funciones (\texttt{main()} @ \texttt{0x1008fc290}, \texttt{rle\_compress()} @ \texttt{0x1008fd4ec}), de solo lectura (R-X).}
+    \label{fig:cap39}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_40.png}
+    \caption{Ejecución secuencial RGB --- \textbf{DATOS}: DATA (\texttt{g\_initialized\_var=42}), BSS (\texttt{g\_total\_runs}), HEAP (72 MB: \texttt{img.data} 50 MB + buffer 25 MB). \textbf{Resultados}: wall time \textbf{0.024s}, CPU 163.9\%, throughput 1990 MB/s, compresión 99.5\%. Este tiempo de 24 ms es la línea base para calcular speedup.}
+    \label{fig:cap40}
+\end{figure}
+
+\subsection{Ejecución Post-Optimización: Paralela --- Estado Antes de Crear Hilos}
+
+El estado ``antes'' muestra cómo el SO asigna recursos antes de que los hilos comiencen a trabajar: stacks reservados pero no usados, buffers pendientes de asignación.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_41.png}
+    \caption{Versión paralela ANTES de \texttt{pthread\_create} --- \textbf{PILA}: stack principal activo; 8 stacks worker reservados (512 KB c/u) en estado ``Pendiente'' con direcciones \texttt{0x0} (el kernel aún no los ha mapeado). \textbf{CÓDIGO}: mismo segmento de texto compartido, con \texttt{rle\_thread\_func()} como punto de entrada de los workers.}
+    \label{fig:cap41}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_42.png}
+    \caption{Versión paralela ANTES --- \textbf{DATOS}: imagen RGB compartida en heap (\texttt{img.data} = 50 MB, 4096$\times$4096 píxeles), marcada como \textsc{lectura compartida} (sin mutex necesario). 8 buffers de escritura pendientes (0 B cada uno). Variables atómicas (\texttt{g\_total\_runs\_atomic}) en BSS. Memoria RSS: 49.23 MB, 9 hilos totales (1 main + 8 workers).}
+    \label{fig:cap42}
+\end{figure}
+
+\subsection{Ejecución Post-Optimización: Paralela --- Estado Después de Ejecutar}
+
+El estado ``después'' revela cómo el kernel asignó recursos reales a cada hilo: TIDs únicos, direcciones de stack distintas, y buffers de escritura privados con datos procesados.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_43.png}
+    \caption{Versión paralela DESPUÉS de \texttt{pthread\_join} --- \textbf{PILA}: los 8 stacks worker ahora tienen TIDs reales asignados por el kernel (\texttt{0x520803}--\texttt{0x52080a}), direcciones de stack consecutivas separadas por exactamente 512 KB (ej. \texttt{0x16b7bef50}, \texttt{0x16b84af50}), confirmando que \texttt{mmap} reservó páginas contiguas. Todos en estado ``Activo''.}
+    \label{fig:cap43}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{cap_44.png}
+    \caption{Versión paralela DESPUÉS --- \textbf{HEAP}: cada hilo completó la compresión de su segmento. Buffers: capacidad 3,145,984 B, usado 33,024 B (compresión $\sim$99\%), estado ``Asignado''. Total buffers: 24 MB. La imagen compartida permanece intacta (lectura sin mutex). RSS final: 49.73 MB---solo 0.5 MB más que antes, demostrando eficiencia en uso de memoria.}
+    \label{fig:cap44}
+\end{figure}
+
+\subsection{Resultados Finales y Comparación Antes/Después}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{cap_45.png}
+    \caption{Resultados paralelos: distribución equitativa de 4096 filas (512 c/u), 6,291,456 bytes por hilo. Tiempo CPU por hilo via \texttt{Mach thread\_info}: 2.3--2.5 ms. Speedup: \textbf{1.91x} (CPU/Wall), eficiencia 23.9\%, throughput 4121 MB/s. El uso de CPU de 262\% confirma ejecución real en múltiples cores.}
+    \label{fig:cap45}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Comparación antes y después de las optimizaciones}
+\begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Métrica} & \textbf{Antes (grayscale)} & \textbf{Después (RGB)} & \textbf{Mejora} \\
+    \midrule
+    Canales             & 1 (grayscale)     & 3 (RGB)           & $\times 3$ datos \\
+    Inicio del Hilo 7   & 18 ms            & 0.58 ms           & 31$\times$ más rápido \\
+    Contención atómica  & Miles/s           & 0 (eliminada)     & Sin bouncing \\
+    Wall secuencial     & 13.4 ms           & 64.9 ms           & Más datos \\
+    Wall paralelo       & 16.3 ms           & 16.7 ms           & Similar \\
+    \textbf{Speedup}    & \textbf{0.82x}    & \textbf{3.89x}    & \textbf{$+374\%$} \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Diagrama de Gantt: Planificación de Hilos y Gestión de Recursos}
+
+Utilizando los datos CSV de PC sampling generados durante la ejecución, se construyó un diagrama de Gantt de 5 filas $\times$ 2 columnas que visualiza la planificación de hilos y la gestión de recursos del SO. Este diagrama es la prueba visual definitiva del speedup logrado.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.98\textwidth]{cap_gantt_scheduling.png}
+    \caption{Diagrama de Gantt completo (secuencial vs paralelo): \textbf{Fila 1}: Gantt de hilos---el secuencial muestra 1 barra continua de 64.9 ms; el paralelo muestra 8 barras simultáneas de $\sim$16 ms. \textbf{Fila 2}: Asignación de CPU por el scheduler---el paralelo utiliza los 8 cores del M1. \textbf{Fila 3}: Evolución del PC---cada hilo tiene su propio Program Counter independiente. \textbf{Fila 4}: Progreso de compresión---las 8 curvas paralelas convergen al 100\% simultáneamente. \textbf{Fila 5}: Conceptos de SO demostrados. \textbf{Speedup: 3.89x} (wall: 64.9 ms $\rightarrow$ 16.7 ms).}
+    \label{fig:gantt-scheduling}
+\end{figure}
+
+\subsection{Lecciones de Sistemas Operativos Aprendidas}
+
+\begin{enumerate}
+    \item \textbf{El overhead de threading es real}: Crear hilos (\texttt{pthread\_create} $\rightarrow$ \texttt{bsdthread\_create} $\rightarrow$ \texttt{mmap} para stacks) tiene un costo. Si el trabajo por hilo es menor que este costo, el paralelismo es contraproducente.
+
+    \item \textbf{La granularidad importa} (Ley de Amdahl): Con 350 KB/hilo (grayscale), el overhead dominaba. Con 1 MB/hilo (RGB), el trabajo útil superó al overhead, permitiendo speedup $> 1$.
+
+    \item \textbf{Las operaciones atómicas no son gratuitas}: \texttt{atomic\_fetch\_add} parece inocuo, pero en un hot loop con 8 cores genera cache-line bouncing constante via el protocolo MESI/MOESI. La solución fue acumular localmente y sincronizar una sola vez al final---principio fundamental de reducción en programación paralela.
+
+    \item \textbf{El scheduler del SO necesita oportunidad}: \texttt{usleep(1000)} entre creaciones de hilos impedía que el scheduler CFS/Mach distribuyera los hilos eficientemente. Sin la pausa, los 8 hilos entran en la cola \emph{ready} en $<1$ ms y el scheduler los asigna a los 8 cores disponibles del Apple M1.
+
+    \item \textbf{Medir antes de optimizar}: Sin los datos de PC sampling y el diagrama de Gantt, las causas del speedup negativo habrían sido invisibles. La instrumentación (\texttt{clock\_gettime}, \texttt{Mach thread\_info}) fue esencial para el diagnóstico.
 \end{enumerate}
 
 % ════════════════════════════════════════════════════════════════════
@@ -847,7 +1245,90 @@ El speedup real (3.41x) es menor debido a:
 
     \item \textbf{Afinidad de cores}: \texttt{THREAD\_AFFINITY\_POLICY} sugiere al kernel distribuir hilos en cores diferentes, mejorando la utilización del CPU.
 
-    \item \textbf{Speedup real}: 3.41x con 8 cores, limitado por la heterogeneidad del M1 y la corta duración de la tarea.
+    \item \textbf{Speedup real}: Tras la optimización (eliminación de \texttt{usleep} y \texttt{atomic\_fetch\_add} del hot loop, migración a RGB), se alcanzó un speedup de \textbf{3.89x} con 8 cores en Apple M1, demostrando paralelismo efectivo en compresión RLE.
+
+    \item \textbf{Optimizaciones clave}: La eliminación de \texttt{usleep(1000)} en el loop de creación de hilos y de \texttt{atomic\_fetch\_add} en el hot loop de compresión fueron determinantes para pasar de un speedup de 0.82x (paralelo más lento) a 3.89x (paralelo 3.89 veces más rápido).
 \end{enumerate}
+\section{Anexos}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Anexo A: Compilación y ejecución rápida}
+
+\begin{lstlisting}[style=bashstyle, caption={Comandos para compilar y ejecutar el proyecto}]
+# Compilar
+make all
+
+# Ejecutar version secuencial (imagen sintetica)
+./rle_secuencial
+
+# Ejecutar version paralela (imagen sintetica)
+./rle_paralelo
+
+# Ejecutar con archivo PPM
+./rle_secuencial foto.ppm
+./rle_paralelo foto.ppm
+
+# Verificar que ambos producen el mismo resultado
+diff output_secuencial.rle output_paralelo.rle
+
+# Ejecutar benchmark completo (5 iteraciones)
+chmod +x benchmark.sh
+./benchmark.sh 5
+
+# Limpiar
+make clean
+\end{lstlisting}
+
+\subsection{Anexo B: Makefile completo}
+
+\begin{lstlisting}[style=makestyle, caption={Makefile del proyecto}]
+CC = gcc
+CFLAGS = -Wall -Wextra -O2
+LDFLAGS = -lpthread
+
+all: rle_secuencial rle_paralelo
+
+rle_secuencial: rle_secuencial.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+rle_paralelo: rle_paralelo.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+secuencial: rle_secuencial
+paralelo: rle_paralelo
+
+benchmark: all
+	@chmod +x benchmark.sh
+	@./benchmark.sh
+
+clean:
+	rm -f rle_secuencial rle_paralelo *.rle reporte_analisis.txt
+
+.PHONY: all clean secuencial paralelo benchmark
+\end{lstlisting}
+
+\subsection{Anexo C: Formato del archivo .rle}
+
+\begin{table}[H]
+\centering
+\caption{Estructura binaria del archivo .rle}
+\begin{tabular}{@{}lllp{5cm}@{}}
+    \toprule
+    \textbf{Offset} & \textbf{Tamaño} & \textbf{Tipo} & \textbf{Descripción} \\
+    \midrule
+    0    & 4 bytes & \texttt{uint32\_t} & Ancho de la imagen (píxeles) \\
+    4    & 4 bytes & \texttt{uint32\_t} & Alto de la imagen (píxeles) \\
+    8    & 4 bytes & Run RLE            & \texttt{[count][R][G][B]} \\
+    12   & 4 bytes & Run RLE            & \texttt{[count][R][G][B]} \\
+    ...  & ...     & ...                & Continúan los runs hasta EOF \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+Donde cada run codifica:
+\begin{itemize}
+    \item \texttt{count}: 1 byte (1--255), número de píxeles consecutivos con el mismo color.
+    \item \texttt{R, G, B}: 1 byte cada uno (0--255), componentes del color.
+\end{itemize}
 
 \end{document}
