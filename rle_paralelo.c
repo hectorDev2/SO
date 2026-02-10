@@ -1727,6 +1727,11 @@ static void print_error_handling_demo(void) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 int main(int argc, char *argv[]) {
+    /* Inicializar seguimiento de SO */
+    setup_signal_handlers();
+    capture_baseline_ctx();
+    g_current_phase = PHASE_INIT;
+
     /* Variables en STACK - marcadores */
     int stack_marker_top = 0;
     Image img;
@@ -1984,6 +1989,7 @@ int main(int argc, char *argv[]) {
            CYAN_M, RESET_M, CYAN_M, RESET_M);
     printf("%s║%s  │                                                                                │  %s║%s\n", CYAN_M, RESET_M, CYAN_M, RESET_M);
 
+    g_current_phase = PHASE_COMPRESS;
     /* PASO 3: Crear hilos */
     printf("%s║%s  │  %s[PASO 3]%s  %spthread_create()%s × %d  (el padre crea los hilos hijos)             │  %s║%s\n",
            CYAN_M, RESET_M, YELLOW_M, RESET_M, RED_M, RESET_M, num_threads, CYAN_M, RESET_M);
@@ -2150,6 +2156,11 @@ int main(int argc, char *argv[]) {
     /* Mostrar línea de tiempo de recursos */
     print_resource_timeline(args, num_threads, t_start, elapsed);
 
+    /* Visualización de conceptos de SO */
+    print_global_variables();
+    print_ipc_visualization(args, num_threads, total_pixels);
+
+    g_current_phase = PHASE_OUTPUT;
     /* Escribir archivo de salida */
     char outpath[512];
     if (input_path[0])
@@ -2173,6 +2184,7 @@ int main(int argc, char *argv[]) {
     /* ═══════════════════════════════════════════════════════════════════
      *  DESCOMPRESIÓN Y GENERACIÓN DE IMAGEN BMP
      * ═══════════════════════════════════════════════════════════════════ */
+    g_current_phase = PHASE_DECOMPRESS;
     printf("\n\033[33m  Descomprimiendo datos RLE...\033[0m\n");
 
     /* Concatenar todos los buffers de los hilos en uno solo */
@@ -2243,6 +2255,15 @@ int main(int argc, char *argv[]) {
         }
         free(all_rle);
     }
+
+    /* ═══════════════════════════════════════════════════════════════════
+     *  VISUALIZACIÓN DE CONCEPTOS DE SO
+     * ═══════════════════════════════════════════════════════════════════ */
+    print_heap_visualization();
+    print_syscall_table();
+    print_trap_demo();
+    print_interrupts_info();
+    print_error_handling_demo();
 
     /* ═══════════════════════════════════════════════════════════════════
      *  EXPORTAR CSV CON DATOS DE SCHEDULING PARA DIAGRAMA DE GANTT
