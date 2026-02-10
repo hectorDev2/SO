@@ -18,12 +18,17 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include <dirent.h>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/thread_info.h>
 #include <mach/thread_act.h>
 #endif
+
+/* stb_image: carga PNG, JPG, BMP, GIF, TGA, PSD, HDR, PIC */
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SEGMENTO DATA: Variables globales (inicializadas y no inicializadas)
@@ -60,6 +65,19 @@ typedef struct {
     atomic_int done;
 } Progress;
 
+/* Muestreo del PC (Program Counter) para el hilo secuencial */
+#define MAX_PC_SAMPLES 256
+
+typedef struct {
+    double    timestamp_ms;
+    uintptr_t pc_addr;
+    size_t    pixels_at;
+} PCSample;
+
+static PCSample g_pc_samples[MAX_PC_SAMPLES];
+static int g_num_pc_samples = 0;
+static struct timespec g_t0_compress; /* Tiempo base de la compresión */
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  DECLARACIONES ADELANTADAS (para mostrar direcciones de código)
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -69,6 +87,10 @@ static void buffer_init(Buffer *buf, size_t cap);
 static void buffer_push(Buffer *buf, const uint8_t *bytes, size_t n);
 static void rle_compress(const uint8_t *pixels, size_t num_pixels, Buffer *out, Progress *prog);
 static void generate_synthetic(Image *img, uint32_t w, uint32_t h);
+static int load_image(const char *path, Image *img);
+static uint8_t *rle_decompress(const uint8_t *rle_data, size_t rle_size,
+                                size_t expected_pixels);
+static void save_bmp(const char *path, const uint8_t *pixels, uint32_t w, uint32_t h);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  INFORMACIÓN DEL SISTEMA OPERATIVO
@@ -138,39 +160,24 @@ static void buffer_push(Buffer *buf, const uint8_t *bytes, size_t n) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  LECTURA PPM / GENERACIÓN SINTÉTICA
+ *  CARGA DE IMAGEN (PNG, JPG, BMP, GIF, TGA, PSD, HDR, PIC via stb_image)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static int load_ppm(const char *path, Image *img) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-
-    char magic[3];
-    if (fscanf(f, "%2s", magic) != 1 || strcmp(magic, "P6") != 0) {
-        fclose(f); return -1;
+static int load_image(const char *path, Image *img) {
+    int w, h, channels;
+    /* stb_image carga en RGB (3 canales) para comparación justa con versión paralela */
+    uint8_t *pixels = stbi_load(path, &w, &h, &channels, 3);
+    if (!pixels) {
+        fprintf(stderr, "  Error cargando '%s': %s\n", path, stbi_failure_reason());
+        return -1;
     }
-
-    int c;
-    while ((c = fgetc(f)) != EOF) {
-        if (c == '#') { while ((c = fgetc(f)) != EOF && c != '\n'); }
-        else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
-        else { ungetc(c, f); break; }
-    }
-
-    int w, h, maxval;
-    if (fscanf(f, "%d %d %d", &w, &h, &maxval) != 3) { fclose(f); return -1; }
-    fgetc(f);
-
     img->width = (uint32_t)w;
     img->height = (uint32_t)h;
-    size_t pixel_bytes = (size_t)w * h * 3;
-    img->data = malloc(pixel_bytes);  /* Asignación en HEAP */
-    if (!img->data) { fclose(f); return -1; }
-
-    if (fread(img->data, 1, pixel_bytes, f) != pixel_bytes) {
-        free(img->data); fclose(f); return -1;
-    }
-    fclose(f);
+    img->data = pixels;  /* stb_image usa malloc internamente → datos en HEAP */
+    printf("\n  \033[32mImagen cargada:\033[0m %s\n", path);
+    printf("    Dimensiones: %d x %d px (%d canales originales → RGB)\n", w, h, channels);
+    printf("    Tamaño datos: %zu bytes (%.2f MB)\n\n",
+           (size_t)w * h * 3, (size_t)w * h * 3 / (1024.0 * 1024.0));
     return 0;
 }
 
@@ -178,21 +185,21 @@ static void generate_synthetic(Image *img, uint32_t w, uint32_t h) {
     img->width = w;
     img->height = h;
     size_t pixel_bytes = (size_t)w * h * 3;
-    img->data = malloc(pixel_bytes);  /* Asignación en HEAP */
+    img->data = malloc(pixel_bytes);
     if (!img->data) { perror("malloc"); exit(1); }
 
     for (uint32_t y = 0; y < h; y++) {
         uint32_t band = y / 8;
-        uint8_t r = (uint8_t)(band * 37 % 256);
-        uint8_t g = (uint8_t)(band * 59 % 256);
-        uint8_t b = (uint8_t)(band * 91 % 256);
+        uint8_t gray = (uint8_t)(band * 17 % 256);
         for (uint32_t x = 0; x < w; x++) {
             size_t idx = ((size_t)y * w + x) * 3;
-            img->data[idx]     = r;
-            img->data[idx + 1] = g;
-            img->data[idx + 2] = b;
+            img->data[idx + 0] = gray;
+            img->data[idx + 1] = gray;
+            img->data[idx + 2] = gray;
         }
-    }
+}
+
+
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -202,27 +209,129 @@ static void generate_synthetic(Image *img, uint32_t w, uint32_t h) {
 static void rle_compress(const uint8_t *pixels, size_t num_pixels,
                          Buffer *out, Progress *prog) {
     size_t i = 0;
+    size_t sample_interval = num_pixels / (MAX_PC_SAMPLES - 2);
+    if (sample_interval < 1) sample_interval = 1;
+    size_t next_sample = 0;
+
+    /* Muestra PC inicial */
+    if (g_num_pc_samples < MAX_PC_SAMPLES) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        g_pc_samples[g_num_pc_samples++] = (PCSample){
+            .timestamp_ms = (now.tv_sec - g_t0_compress.tv_sec) * 1000.0 +
+                            (now.tv_nsec - g_t0_compress.tv_nsec) / 1e6,
+            .pc_addr = (uintptr_t)rle_compress,
+            .pixels_at = 0
+        };
+    }
+
     while (i < num_pixels) {
-        uint8_t r = pixels[i * 3];
-        uint8_t g = pixels[i * 3 + 1];
-        uint8_t b = pixels[i * 3 + 2];
+        uint8_t gray = pixels[i];
         uint8_t count = 1;
 
         while (i + count < num_pixels && count < 255 &&
-               pixels[(i + count) * 3]     == r &&
-               pixels[(i + count) * 3 + 1] == g &&
-               pixels[(i + count) * 3 + 2] == b) {
+               pixels[i + count] == gray) {
             count++;
         }
 
-        uint8_t run[4] = { count, r, g, b };
-        buffer_push(out, run, 4);
+        uint8_t run[2] = { count, gray };
+        buffer_push(out, run, 2);
         i += count;
-        g_total_runs++;  /* Variable global en BSS */
+        g_total_runs++;
 
         atomic_store(&prog->pixels_processed, i);
         atomic_store(&prog->compressed_bytes, out->size);
+
+        /* Muestrear PC periódicamente */
+        if (i >= next_sample && g_num_pc_samples < MAX_PC_SAMPLES) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            g_pc_samples[g_num_pc_samples++] = (PCSample){
+                .timestamp_ms = (now.tv_sec - g_t0_compress.tv_sec) * 1000.0 +
+                                (now.tv_nsec - g_t0_compress.tv_nsec) / 1e6,
+                .pc_addr = (uintptr_t)rle_compress + (i & 0xFFF),
+                .pixels_at = i
+            };
+            next_sample += sample_interval;
+        }
     }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  DESCOMPRESIÓN RLE → PÍXELES RGB
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static uint8_t *rle_decompress(const uint8_t *rle_data, size_t rle_size,
+                                size_t expected_pixels) {
+    uint8_t *pixels = (uint8_t *)malloc(expected_pixels);
+    if (!pixels) { perror("malloc decompress"); return NULL; }
+
+    size_t px = 0;
+    size_t i = 0;
+    while (i + 1 < rle_size && px < expected_pixels) {
+        uint8_t count = rle_data[i];
+        uint8_t gray = rle_data[i + 1];
+        for (uint8_t j = 0; j < count && px < expected_pixels; j++) {
+            pixels[px] = gray;
+            px++;
+        }
+        i += 2;
+    }
+    return pixels;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  GUARDAR IMAGEN BMP (sin dependencias externas)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void save_bmp(const char *path, const uint8_t *pixels,
+                      uint32_t w, uint32_t h) {
+    uint32_t row_stride = (w * 3 + 3) & ~3u;
+    uint32_t pixel_data_size = row_stride * h;
+    uint32_t file_size = 14 + 40 + pixel_data_size;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror("fopen bmp"); return; }
+
+    uint8_t fh[14] = {0};
+    fh[0] = 'B'; fh[1] = 'M';
+    fh[2] = file_size & 0xFF;
+    fh[3] = (file_size >> 8) & 0xFF;
+    fh[4] = (file_size >> 16) & 0xFF;
+    fh[5] = (file_size >> 24) & 0xFF;
+    uint32_t offset = 14 + 40;
+    fh[10] = offset & 0xFF;
+    fh[11] = (offset >> 8) & 0xFF;
+    fwrite(fh, 1, 14, f);
+
+    uint8_t ih[40] = {0};
+    ih[0] = 40;
+    ih[4] = w & 0xFF; ih[5] = (w >> 8) & 0xFF;
+    ih[6] = (w >> 16) & 0xFF; ih[7] = (w >> 24) & 0xFF;
+    ih[8] = h & 0xFF; ih[9] = (h >> 8) & 0xFF;
+    ih[10] = (h >> 16) & 0xFF; ih[11] = (h >> 24) & 0xFF;
+    ih[12] = 1;
+    ih[14] = 24;
+    ih[20] = pixel_data_size & 0xFF;
+    ih[21] = (pixel_data_size >> 8) & 0xFF;
+    ih[22] = (pixel_data_size >> 16) & 0xFF;
+    ih[23] = (pixel_data_size >> 24) & 0xFF;
+    fwrite(ih, 1, 40, f);
+
+    uint8_t *row = (uint8_t *)calloc(row_stride, 1);
+    if (!row) { fclose(f); return; }
+    for (int y = (int)h - 1; y >= 0; y--) {
+        memset(row, 0, row_stride);
+        for (uint32_t x = 0; x < w; x++) {
+            size_t src = ((size_t)y * w + x) * 3;
+            row[x * 3 + 0] = pixels[src + 2];  /* B */
+            row[x * 3 + 1] = pixels[src + 1];  /* G */
+            row[x * 3 + 2] = pixels[src + 0];  /* R */
+        }
+        fwrite(row, 1, row_stride, f);
+    }
+    free(row);
+    fclose(f);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -338,17 +447,17 @@ static void print_memory_segments(Image *img, Buffer *compressed,
     printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
     printf("%s║%s  %s▓%s                                                                                %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
     printf("%s║%s  %s▓%s  %s┌─ HEAP (memoria dinámica - malloc) ─────────────────────────────────────┐%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
-    printf("%s║%s  %s▓%s  │  img.data               %s0x%014lx%s  %10zu bytes (imagen)    │ %s▓%s  %s║%s\n",
+    printf("%s║%s  %s▓%s  │  img.data               %s0x%014lx%s  %10zu bytes (RGB)       │ %s▓%s  %s║%s\n",
            CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)img->data, RESET,
            (size_t)img->width * img->height * 3, GREEN, RESET, CYAN, RESET);
     printf("%s║%s  %s▓%s  │  compressed.data        %s0x%014lx%s  %10zu bytes (buffer)    │ %s▓%s  %s║%s\n",
            CYAN, RESET, GREEN, RESET, MAGENTA, (unsigned long)compressed->data, RESET,
            compressed->capacity, GREEN, RESET, CYAN, RESET);
     printf("%s║%s  %s▓%s  │                                                                         │ %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, GREEN, RESET, CYAN, RESET);
-    printf("%s║%s  %s▓%s  │  Total HEAP usado:      %s%zu bytes (%.2f MB)%s                            │ %s▓%s  %s║%s\n",
+    printf("%s║%s  %s▓%s  │  Total HEAP usado:      %s%zu bytes (%.2f KB)%s                            │ %s▓%s  %s║%s\n",
            CYAN, RESET, GREEN, RESET, GREEN,
            (size_t)img->width * img->height * 3 + compressed->capacity,
-           ((size_t)img->width * img->height * 3 + compressed->capacity) / (1024.0 * 1024.0),
+           ((size_t)img->width * img->height * 3 + compressed->capacity) / 1024.0,
            RESET, GREEN, RESET, CYAN, RESET);
     printf("%s║%s  %s▓%s  %s└─────────────────────────────────────────────────────────────────────────┘%s %s▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, WHITE, RESET, GREEN, RESET, CYAN, RESET);
     printf("%s║%s  %s▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓%s  %s║%s\n", CYAN, RESET, GREEN, RESET, CYAN, RESET);
@@ -424,19 +533,139 @@ int main(int argc, char *argv[]) {
     Buffer compressed;
     Progress prog;
     int stack_marker_top = 0;    /* Para medir tope de pila */
+    int used_stb = 0;            /* Flag para saber si liberar con stbi_image_free */
+    char input_path[512] = {0};
 
-    /* Cargar o generar imagen */
+    /* Cargar imagen: argumento, menú interactivo, o sintética */
     if (argc >= 2) {
-        if (load_ppm(argv[1], &img) != 0) {
-            fprintf(stderr, "Error: no se pudo leer '%s' como PPM P6\n", argv[1]);
+        strncpy(input_path, argv[1], sizeof(input_path) - 1);
+        if (load_image(input_path, &img) != 0) {
             return 1;
         }
+        used_stb = 1;
     } else {
-        generate_synthetic(&img, 4096, 4096);
+        /* Escanear carpeta image/ y listar imágenes disponibles */
+        const char *img_dir = "image";
+        char files[64][256];
+        int nfiles = 0;
+
+        DIR *dir = opendir(img_dir);
+        if (dir) {
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL && nfiles < 64) {
+                const char *name = entry->d_name;
+                size_t len = strlen(name);
+                if (len < 5) continue;
+                const char *ext = name + len - 4;
+                const char *ext3 = name + len - 3;
+                if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
+                    strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".gif") == 0 ||
+                    strcasecmp(ext, ".tga") == 0 || strcasecmp(ext, ".psd") == 0 ||
+                    strcasecmp(ext, ".hdr") == 0 || strcasecmp(ext3, ".jpeg") == 0) {
+                    strncpy(files[nfiles], name, 255);
+                    files[nfiles][255] = '\0';
+                    nfiles++;
+                }
+            }
+            closedir(dir);
+        }
+
+        printf("\n\033[1;36m╔══════════════════════════════════════════════════════════════╗\033[0m\n");
+        printf("\033[1;36m║\033[0m  \033[1;33mCOMPRESIÓN RLE - MODO SECUENCIAL\033[0m                            \033[1;36m║\033[0m\n");
+        printf("\033[1;36m╠══════════════════════════════════════════════════════════════╣\033[0m\n");
+        printf("\033[1;36m║\033[0m                                                              \033[1;36m║\033[0m\n");
+        printf("\033[1;36m║\033[0m  \033[1;37mImágenes disponibles en /%s/:\033[0m                              \033[1;36m║\033[0m\n", img_dir);
+        printf("\033[1;36m║\033[0m                                                              \033[1;36m║\033[0m\n");
+
+        if (nfiles == 0) {
+            printf("\033[1;36m║\033[0m    \033[31m(No se encontraron imágenes en /%s/)\033[0m                  \033[1;36m║\033[0m\n", img_dir);
+        } else {
+            for (int i = 0; i < nfiles; i++) {
+                printf("\033[1;36m║\033[0m    \033[1;32m[%d]\033[0m %-50s  \033[1;36m║\033[0m\n", i + 1, files[i]);
+            }
+        }
+
+        printf("\033[1;36m║\033[0m                                                              \033[1;36m║\033[0m\n");
+        printf("\033[1;36m║\033[0m    \033[1;33m[0]\033[0m Usar imagen sintética (4096x4096)                    \033[1;36m║\033[0m\n");
+        printf("\033[1;36m║\033[0m    \033[1;35m[B]\033[0m Buscar archivo con explorador de archivos...         \033[1;36m║\033[0m\n");
+        printf("\033[1;36m║\033[0m                                                              \033[1;36m║\033[0m\n");
+        printf("\033[1;36m╚══════════════════════════════════════════════════════════════╝\033[0m\n");
+        printf("\n  Seleccione imagen (número o 'b'): ");
+        fflush(stdout);
+
+        char choice[16];
+        int sel = 0;
+        int use_browser = 0;
+        if (fgets(choice, sizeof(choice), stdin)) {
+            if (choice[0] == 'b' || choice[0] == 'B') {
+                use_browser = 1;
+            } else {
+                sel = atoi(choice);
+            }
+        }
+
+        if (use_browser) {
+            /* Abrir diálogo nativo de macOS para seleccionar imagen */
+            FILE *fp = popen(
+                "osascript -e 'set theFile to choose file with prompt "
+                "\"Seleccione una imagen para comprimir\" of type "
+                "{\"public.png\", \"public.jpeg\", \"public.bmp\", \"public.gif\", "
+                "\"public.targa-image\", \"com.adobe.photoshop-image\", "
+                "\"public.radiance\"}' "
+                "-e 'POSIX path of theFile'", "r");
+            if (fp) {
+                char browser_path[512] = {0};
+                if (fgets(browser_path, sizeof(browser_path), fp)) {
+                    /* Quitar salto de línea */
+                    size_t blen = strlen(browser_path);
+                    if (blen > 0 && browser_path[blen - 1] == '\n')
+                        browser_path[blen - 1] = '\0';
+                    strncpy(input_path, browser_path, sizeof(input_path) - 1);
+                }
+                int ret = pclose(fp);
+                if (ret != 0 || input_path[0] == '\0') {
+                    printf("  \033[33mNo se seleccionó archivo. Usando imagen sintética...\033[0m\n");
+                    generate_synthetic(&img, 4096, 4096);
+                } else if (load_image(input_path, &img) != 0) {
+                    printf("  \033[33mUsando imagen sintética como respaldo...\033[0m\n");
+                    generate_synthetic(&img, 4096, 4096);
+                } else {
+                    used_stb = 1;
+                }
+            } else {
+                printf("  \033[33mNo se pudo abrir el explorador. Usando imagen sintética...\033[0m\n");
+                generate_synthetic(&img, 4096, 4096);
+            }
+        } else if (sel >= 1 && sel <= nfiles) {
+            snprintf(input_path, sizeof(input_path), "%s/%s", img_dir, files[sel - 1]);
+            if (load_image(input_path, &img) != 0) {
+                printf("  \033[33mUsando imagen sintética como respaldo...\033[0m\n");
+                generate_synthetic(&img, 4096, 4096);
+            } else {
+                used_stb = 1;
+            }
+        } else {
+            printf("  \033[33mGenerando imagen sintética 4096x4096...\033[0m\n");
+            generate_synthetic(&img, 4096, 4096);
+        }
     }
 
     size_t total_pixels = (size_t)img.width * img.height;
     size_t raw_size = total_pixels * 3;
+
+    /* Guardar archivo RAW (RGB) */
+    char rawpath[512];
+    if (input_path[0])
+        snprintf(rawpath, sizeof(rawpath), "%s.raw", input_path);
+    else
+        snprintf(rawpath, sizeof(rawpath), "output.raw");
+
+    FILE *fraw = fopen(rawpath, "wb");
+    if (fraw) {
+        fwrite(img.data, 1, raw_size, fraw);
+        fclose(fraw);
+        printf("  \033[32mArchivo RAW guardado:\033[0m %s (%.2f KB)\n", rawpath, raw_size / 1024.0);
+    }
 
     /* Inicializar buffer (asigna en HEAP) */
     buffer_init(&compressed, raw_size / 2);
@@ -457,9 +686,11 @@ int main(int argc, char *argv[]) {
     /* Medir tiempo */
     struct timespec t_start, t_end;
     clock_gettime(CLOCK_MONOTONIC, &t_start);
+    g_t0_compress = t_start;  /* Tiempo base para muestreo del PC */
+    g_num_pc_samples = 0;
 
     /* COMPRESIÓN */
-    rle_compress(img.data, total_pixels, &compressed, &prog);
+    rle_compress(img.data, raw_size, &compressed, &prog);
 
     clock_gettime(CLOCK_MONOTONIC, &t_end);
     double elapsed = (t_end.tv_sec - t_start.tv_sec) +
@@ -474,8 +705,8 @@ int main(int argc, char *argv[]) {
 
     /* Escribir archivo de salida */
     char outpath[512];
-    if (argc >= 2)
-        snprintf(outpath, sizeof(outpath), "%s.rle", argv[1]);
+    if (input_path[0])
+        snprintf(outpath, sizeof(outpath), "%s_secuencial.rle", input_path);
     else
         snprintf(outpath, sizeof(outpath), "output_secuencial.rle");
 
@@ -485,11 +716,124 @@ int main(int argc, char *argv[]) {
         fwrite(header, sizeof(uint32_t), 2, fout);
         fwrite(compressed.data, 1, compressed.size, fout);
         fclose(fout);
-        printf("\n  Archivo guardado: %s\n\n", outpath);
+        printf("\n  \033[32mArchivo comprimido guardado:\033[0m %s\n", outpath);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════
+     *  DESCOMPRESIÓN Y GENERACIÓN DE IMAGEN BMP
+     * ═══════════════════════════════════════════════════════════════════ */
+    printf("\n\033[33m  Descomprimiendo datos RLE...\033[0m\n");
+
+    struct timespec td_start, td_end;
+    clock_gettime(CLOCK_MONOTONIC, &td_start);
+
+    uint8_t *decoded = rle_decompress(compressed.data, compressed.size, raw_size);
+
+    clock_gettime(CLOCK_MONOTONIC, &td_end);
+    double decomp_time = (td_end.tv_sec - td_start.tv_sec) +
+                         (td_end.tv_nsec - td_start.tv_nsec) / 1e9;
+
+    if (decoded) {
+        /* Verificar integridad: comparar con imagen original */
+        int match = (memcmp(decoded, img.data, raw_size) == 0);
+
+        /* Guardar como BMP */
+        char bmppath[512];
+        if (input_path[0])
+            snprintf(bmppath, sizeof(bmppath), "%s_secuencial_descomprimida.bmp", input_path);
+        else
+            snprintf(bmppath, sizeof(bmppath), "output_secuencial_descomprimida.bmp");
+
+        save_bmp(bmppath, decoded, img.width, img.height);
+
+        const char *CYAN = "\033[36m";
+        const char *GREEN = "\033[32m";
+        const char *YELLOW = "\033[33m";
+        const char *WHITE = "\033[1;37m";
+        const char *RED = "\033[31m";
+        const char *RESET = "\033[0m";
+
+        printf("\n");
+        printf("%s╔══════════════════════════════════════════════════════════════════════════════════════╗%s\n", CYAN, RESET);
+        printf("%s║%s                    %s*** DESCOMPRESIÓN Y VERIFICACIÓN ***%s                          %s║%s\n", CYAN, RESET, YELLOW, RESET, CYAN, RESET);
+        printf("%s╠══════════════════════════════════════════════════════════════════════════════════════╣%s\n", CYAN, RESET);
+        printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+        printf("%s║%s  %sTiempo de descompresión:%s  %s%12.6f%s segundos                                     %s║%s\n",
+               CYAN, RESET, WHITE, RESET, GREEN, decomp_time, RESET, CYAN, RESET);
+        printf("%s║%s  %sPíxeles decodificados:%s    %s%12zu%s                                              %s║%s\n",
+               CYAN, RESET, WHITE, RESET, GREEN, total_pixels, RESET, CYAN, RESET);
+        printf("%s║%s  %sBytes decodificados:%s      %s%12zu%s (%.2f MB)                                    %s║%s\n",
+               CYAN, RESET, WHITE, RESET, GREEN, raw_size, RESET, raw_size / (1024.0 * 1024.0), CYAN, RESET);
+        printf("%s║%s  %sIntegridad:%s               %s%s%s                                                    %s║%s\n",
+               CYAN, RESET, WHITE, RESET,
+               match ? GREEN : RED,
+               match ? "CORRECTA - Imagen idéntica al original" : "ERROR - Diferencias detectadas",
+               RESET, CYAN, RESET);
+        printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+        printf("%s║%s  %sImagen descomprimida:%s     %s%-50s%s     %s║%s\n",
+               CYAN, RESET, WHITE, RESET, GREEN, bmppath, RESET, CYAN, RESET);
+        printf("%s║%s  %sFormato:%s                  BMP (24-bit RGB, sin compresión)                       %s║%s\n",
+               CYAN, RESET, WHITE, RESET, CYAN, RESET);
+        printf("%s║%s  %sDimensiones:%s              %u x %u px                                             %s║%s\n",
+               CYAN, RESET, WHITE, RESET, img.width, img.height, CYAN, RESET);
+        printf("%s║%s                                                                                      %s║%s\n", CYAN, RESET, CYAN, RESET);
+        printf("%s╚══════════════════════════════════════════════════════════════════════════════════════╝%s\n\n", CYAN, RESET);
+
+        free(decoded);
+    } else {
+        printf("  \033[31mError: No se pudo descomprimir los datos RLE.\033[0m\n\n");
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════
+     *  EXPORTAR CSV CON DATOS DE SCHEDULING PARA DIAGRAMA DE GANTT
+     * ═══════════════════════════════════════════════════════════════════ */
+    {
+        char csvpath[512];
+        if (input_path[0])
+            snprintf(csvpath, sizeof(csvpath), "%s_secuencial_gantt.csv", input_path);
+        else
+            snprintf(csvpath, sizeof(csvpath), "output_secuencial_gantt.csv");
+
+        uint64_t main_tid = 0;
+#ifdef __APPLE__
+        pthread_threadid_np(NULL, &main_tid);
+#endif
+
+        FILE *csv = fopen(csvpath, "w");
+        if (csv) {
+            fprintf(csv, "algorithm,pid,num_threads,wall_ms,total_cpu_ms\n");
+            fprintf(csv, "secuencial,%d,1,%.4f,%.4f\n",
+                    getpid(), elapsed * 1000, (user_t + sys_t) * 1000);
+            fprintf(csv, "\n");
+
+            fprintf(csv, "thread_id,tid,core,start_ms,end_ms,cpu_user_ms,cpu_sys_ms,pixels,compressed_bytes,stack_addr\n");
+            fprintf(csv, "0,0x%lx,0,0.0000,%.4f,%.4f,%.4f,%zu,%zu,0x%lx\n",
+                    (unsigned long)main_tid,
+                    elapsed * 1000,
+                    user_t * 1000, sys_t * 1000,
+                    total_pixels, compressed.size,
+                    (unsigned long)&stack_marker_top);
+            fprintf(csv, "\n");
+
+            /* Muestras reales del PC durante la compresión */
+            fprintf(csv, "thread_id,sample_idx,timestamp_ms,pc_addr,core_id,pixels_at\n");
+            for (int s = 0; s < g_num_pc_samples; s++) {
+                fprintf(csv, "0,%d,%.4f,0x%lx,0,%zu\n",
+                        s, g_pc_samples[s].timestamp_ms,
+                        (unsigned long)g_pc_samples[s].pc_addr,
+                        g_pc_samples[s].pixels_at);
+            }
+
+            fclose(csv);
+            printf("  \033[32mDatos de scheduling exportados:\033[0m %s\n\n", csvpath);
+        }
     }
 
     /* Liberar memoria del HEAP */
-    free(img.data);
+    if (used_stb)
+        stbi_image_free(img.data);  /* stb_image usa su propio allocator */
+    else
+        free(img.data);
     free(compressed.data);
     return 0;
 }
