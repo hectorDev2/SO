@@ -1,6 +1,6 @@
 # Compresión RLE de Imágenes: Secuencial vs Paralelo
 
-Proyecto de Sistemas Operativos que implementa compresión Run-Length Encoding (RLE) sobre imágenes RGB en dos versiones — secuencial (1 hilo) y paralela (pthreads, 1 hilo por core) — para analizar el impacto del paralelismo en rendimiento.
+Proyecto de Sistemas Operativos (UNSAAC) que implementa compresión Run-Length Encoding (RLE) sobre imágenes RGB en dos versiones — secuencial (1 hilo) y paralela (pthreads, 1 hilo por core) — para analizar el impacto del paralelismo en rendimiento y demostrar conceptos de sistemas operativos.
 
 ---
 
@@ -10,12 +10,15 @@ Proyecto de Sistemas Operativos que implementa compresión Run-Length Encoding (
 2. [Instalación y Compilación](#instalación-y-compilación)
 3. [Manual de Uso](#manual-de-uso)
 4. [Arquitectura del Código](#arquitectura-del-código)
-5. [Algoritmo RLE](#algoritmo-rle)
-6. [Estrategia de Paralelización](#estrategia-de-paralelización)
-7. [Métricas Reportadas](#métricas-reportadas)
-8. [Análisis Comparativo](#análisis-comparativo)
-9. [Formato de Archivos](#formato-de-archivos)
-10. [Conclusiones sobre Paralelización](#conclusiones-sobre-paralelización)
+5. [Herramientas de Análisis](#herramientas-de-análisis)
+6. [Conceptos de SO Demostrados](#conceptos-de-so-demostrados)
+7. [Algoritmo RLE](#algoritmo-rle)
+8. [Estrategia de Paralelización](#estrategia-de-paralelización)
+9. [Métricas Reportadas](#métricas-reportadas)
+10. [Análisis Comparativo](#análisis-comparativo)
+11. [Formato de Archivos](#formato-de-archivos)
+12. [Estructura del Proyecto](#estructura-del-proyecto)
+13. [Conclusiones sobre Paralelización](#conclusiones-sobre-paralelización)
 
 ---
 
@@ -26,6 +29,9 @@ Proyecto de Sistemas Operativos que implementa compresión Run-Length Encoding (
 - **Make**: GNU Make o compatible
 - **Bash**: Para el script de benchmark (versión 3.2+)
 - **bc**: Calculadora de línea de comandos (para el benchmark)
+- **Python 3**: Para gantt_chart.py
+- **matplotlib**: Para generación de diagramas de Gantt (`pip3 install matplotlib`)
+- **LaTeX**: Opcional, para compilar informe.tex (`pdflatex`)
 
 ### Hardware (recomendado)
 - CPU multi-core (2+ cores para apreciar el paralelismo)
@@ -78,6 +84,13 @@ make clean   # Elimina ejecutables y archivos .rle
 
 ## Manual de Uso
 
+### Compilación
+
+```bash
+make all    # Compilar ambos programas
+make clean  # Limpiar ejecutables y archivos .rle
+```
+
 ### Ejecución básica (imagen sintética)
 
 ```bash
@@ -88,17 +101,34 @@ make clean   # Elimina ejecutables y archivos .rle
 ./rle_paralelo
 ```
 
-### Ejecución con archivo PPM
+### Ejecución con imagen
 
 ```bash
-# Comprimir un archivo PPM con la versión secuencial
+# Con archivo PPM
 ./rle_secuencial foto.ppm
-
-# Comprimir el mismo archivo con la versión paralela
 ./rle_paralelo foto.ppm
+
+# Con cualquier imagen (PNG, JPG, BMP)
+./rle_secuencial foto.jpg
+./rle_paralelo foto.jpg
 ```
 
-### Benchmark automático
+### Script unificado (recomendado)
+
+```bash
+# Con selector de archivos (macOS)
+./run_compresion.sh
+
+# Con imagen específica
+./run_compresion.sh imagen.jpg
+
+# Genera automáticamente:
+# - Compresión secuencial y paralela
+# - Diagrama de Gantt (gantt_scheduling.png)
+# - Resumen de archivos generados
+```
+
+### Benchmark automático (benchmark.sh)
 
 ```bash
 # Dar permisos de ejecución
@@ -126,6 +156,20 @@ diff output_secuencial.rle output_paralelo.rle
 # No debe producir salida (archivos idénticos)
 ```
 
+### Generar diagrama de Gantt
+
+```bash
+# Los CSV se generan automáticamente al ejecutar rle_secuencial/rle_paralelo
+python3 gantt_chart.py <imagen>_secuencial_gantt.csv <imagen>_paralelo_gantt.csv <output>.png
+```
+
+### Compilar informe
+
+```bash
+# Generar PDF del informe completo
+pdflatex informe.tex
+```
+
 ---
 
 ## Arquitectura del Código
@@ -138,25 +182,32 @@ diff output_secuencial.rle output_paralelo.rle
 ├── rle_paralelo.c         # Versión paralela (N hilos con pthreads)
 ├── Makefile               # Sistema de compilación
 ├── benchmark.sh           # Script de análisis comparativo
+├── run_compresion.sh      # Script unificado con UI visual
+├── gantt_chart.py         # Generador de diagramas de Gantt
+├── stb_image.h           # Biblioteca para carga de imágenes
 ├── README.md              # Esta documentación
-└── reporte_analisis.txt   # Generado por benchmark.sh
+├── informe.tex           # Informe completo en LaTeX
+├── captures/             # Capturas de pantalla del desarrollo
+└── image/                # Imágenes de prueba y outputs
 ```
 
-### Organización del código (ambos archivos)
+### Organización del código (rle_secuencial.c y rle_paralelo.c)
 
-Cada archivo `.c` está organizado en 9 secciones claramente delimitadas:
+Cada archivo `.c` está organizado en secciones claramente delimitadas:
 
 | Sección | Contenido |
 |---------|-----------|
-| 1. Estructuras de datos | `Image`, `Buffer`, `Progress`/`ThreadArg` |
-| 2. Buffer dinámico | `buffer_init`, `buffer_push` |
-| 3. Métricas del sistema | `get_rss`, `get_cpu_times`, `get_thread_cpu` |
-| 4. Lectura PPM | `load_ppm` — parser de formato P6 |
-| 5. Imagen sintética | `generate_synthetic` — patrones de prueba |
-| 6. Visualización | `print_bar`, `print_display` — UI en terminal |
-| 7. Hilo monitor | `monitor_func` — refresco periódico del display |
-| 8. Compresión RLE | `rle_compress` / `rle_thread_func` |
-| 9. Función principal | `main` — orquestación del flujo |
+| 1. Includes y defines | Bibliotecas, constantes, macros de colores |
+| 2. Estructuras de datos | `Image`, `Buffer`, `Progress`/`ThreadArg` |
+| 3. Buffer dinámico | `buffer_init`, `buffer_push` con crecimiento amortizado |
+| 4. Métricas del sistema | `get_rss`, `get_cpu_times`, `get_thread_cpu`, sampling de PC |
+| 5. Lectura de imágenes | Parser PPM, carga con stb_image.h |
+| 6. Imagen sintética | `generate_synthetic` — patrones de prueba deterministas |
+| 7. Visualización | Barras de progreso, recuadros ANSI |
+| 8. Hilo monitor | `monitor_func` — refresco periódico del display |
+| 9. Compresión RLE | `rle_compress` / `rle_thread_func` |
+| 10. CSV de scheduling | Generación de datos para gantt_chart.py |
+| 11. Función main | Orquestación del flujo completo |
 
 ---
 
@@ -284,16 +335,35 @@ Hilos con tags diferentes reciben la "sugerencia" del kernel de ejecutarse en co
 | Uso CPU % | Calculado | `(usr+sys) / wall × 100`. Esperado: ≤100% |
 | Memoria RSS | Mach `task_info` | RAM física consumida |
 | Throughput | Calculado | MB procesados por segundo |
+| PCI samples | `thread_info` | Muestreo del Program Counter |
+| Scheduling CSV | Generado | Datos para diagrama de Gantt |
 
 ### Versión paralela (adicional)
 
 | Métrica | Fuente | Descripción |
 |---------|--------|-------------|
 | TID por hilo | `pthread_threadid_np` | ID nativo del sistema operativo |
+| Core asignado | `thread_affinity_policy` | Core donde ejecuta el hilo |
 | CPU por hilo | Mach `thread_info` | ms de CPU consumidos individualmente |
 | Progreso por hilo | `atomic_size_t` | Barra visual independiente por hilo |
+| PCI por hilo | Muestreo individual | Evolución del PC de cada hilo |
 | Speedup | Calculado | `cpu_total / wall_time` (>1 = paralelismo real) |
 | Uso CPU % | Calculado | Puede superar 100% (N cores × 100%) |
+| Scheduling CSV | Generado | Datos para gantt_chart.py |
+
+### Archivos CSV de Scheduling
+
+Los programas generan archivos CSV con datos de scheduling:
+
+```
+<imagen>_secuencial_gantt.csv
+<imagen>_paralelo_gantt.csv
+```
+
+Contenido:
+- Metadatos (wall time, CPU total, número de hilos)
+- Información por hilo (TID, core, start/end time, CPU user/sys)
+- Muestreo del Program Counter a ~1ms interval
 
 ---
 
@@ -311,6 +381,10 @@ La **evidencia clave** de que se están usando múltiples cores es:
 
 4. **Tiempos de CPU similares por hilo**: Si todos los hilos consumen ~2-3ms de CPU, están ejecutándose en paralelo, no secuencialmente.
 
+5. **Diagrama de Gantt**: Las barras de CPU de cada hilo son sólidas y simultáneas, no escalonadas.
+
+6. **Evolución del PCI**: Múltiples líneas de PC evolucionan simultáneamente.
+
 ### Métricas típicas observadas
 
 | Métrica | Secuencial | Paralelo (8 cores) |
@@ -321,6 +395,22 @@ La **evidencia clave** de que se están usando múltiples cores es:
 | Speedup | 1.0x | ~4.1x |
 | Memoria | ~50 MB | ~50 MB |
 | Resultado | 264,200 bytes | 264,200 bytes (idéntico) |
+
+### Diagnóstico: Speedup Negativo
+
+El proyecto incluye un análisis detallado de qué ocurre cuando el speedup es < 1 (paralelo más lento que secuencial):
+
+**Causas comunes:**
+- `usleep()` artificial entre `pthread_create()` — hilos escalonados, no paralelos
+- Contadores atómicos en hot loops — cache-line bouncing
+- Datos insuficientes por hilo — overhead > beneficio
+
+**Soluciones:**
+- Eliminar pausas innecesarias entre creación de hilos
+- Mover atómicos fuera de bucles críticos
+- Usar buffers locales, contador local + atómico al final
+
+Este análisis está documentado en `informe.tex` con capturas de Gantt mostrando el problema y la solución.
 
 ---
 
@@ -336,6 +426,10 @@ maxval\n                ← Típicamente 255
 <datos binarios>        ← width × height × 3 bytes (RGB)
 ```
 
+### Entrada: Otros formatos (PNG, JPG, BMP)
+
+El programa utiliza `stb_image.h` para cargar cualquier formato de imagen estándar. La imagen se convierte a RGB de 8 bits.
+
 ### Salida: .rle
 
 ```
@@ -346,6 +440,28 @@ Offset 8+:  runs RLE            (secuencia de bloques de 4 bytes)
               [count][R][G][B]
               ...
 ```
+
+### Salida: CSV de Scheduling
+
+```
+<meta>
+wall_ms,total_cpu_ms,num_threads,pixels,pid
+
+<threads>
+thread_id,tid,start_ms,end_ms,cpu_user_ms,cpu_sys_ms,pixels,stack_addr
+
+<pc_samples>
+timestamp_ms,thread_id,pc_addr,pixels_at
+```
+
+### Salida: Diagrama de Gantt (PNG)
+
+Imagen generada por `gantt_chart.py` con múltiples paneles:
+- Diagrama principal Secuencial vs Paralelo
+- Asignación de CPU por el Scheduler
+- Evolución del Program Counter
+- Progreso de compresión por hilo
+- Resumen de conceptos de SO
 
 ---
 
@@ -392,3 +508,117 @@ Para este proyecto, S ≈ 0.01 (solo merge y I/O de archivo):
 | False sharing | Variable | ThreadArgs separados en heap |
 | Cache misses | Bajo | Acceso secuencial por bloque |
 | Merge de resultados | O(N) | Escritura secuencial a disco |
+
+---
+
+## Herramientas de Análisis
+
+### run_compresion.sh — Script Unificado con Visualización
+
+Script Bash con interfaz visual completa que:
+
+- Abre explorador de archivos para seleccionar imagen (macOS)
+- Ejecuta versión secuencial y paralela automáticamente
+- Genera diagrama de Gantt con `gantt_chart.py`
+- Muestra resumen de archivos generados
+- Abre el diagrama automáticamente
+
+```bash
+# Ejecutar con selector de archivos
+./run_compresion.sh
+
+# O pasar imagen directamente
+./run_compresion.sh imagen.jpg
+```
+
+### gantt_chart.py — Generador de Diagramas de Gantt
+
+Visualización completa de la planificación de hilos usando matplotlib:
+
+- **Diagrama principal**: Secuencial vs Paralelo con barras de CPU vs Wall time
+- **Asignación de CPU**: Cómo el scheduler distribuye hilos en cores
+- **Evolución del PCI**: Program Counter de cada hilo en el tiempo
+- **Progreso por hilo**: Curvas de compresión individuales
+- **Conceptos SO**: Resumen de PCB/TCB, contextos, hilos, scheduler
+
+```bash
+python3 gantt_chart.py <csv_secuencial> <csv_paralelo> <output.png>
+```
+
+Archivos CSV generados automaticamente por los programas RLE con datos de scheduling.
+
+### informe.tex — Documentación Completa del Proyecto
+
+Informe formal en LaTeX (~1500+ líneas) que incluye:
+
+- Metodología de desarrollo asistido por IA (Claude Code)
+- Iteraciones del proyecto con capturas de pantalla
+- Análisis técnico del código fuente
+- Análisis comparativo de rendimiento
+- Diagnóstico de speedup negativo y optimizaciones
+- Visualización de segmentos de memoria (PILA, DATA, BSS, HEAP)
+- Diagramas de Gantt generados
+
+Compilar con:
+```bash
+pdflatex informe.tex
+```
+
+---
+
+## Conceptos de SO Demostrados
+
+Este proyecto es una herramienta pedagógica para demostrar conceptos fundamentales de sistemas operativos:
+
+| Concepto | Descripción | Cómo se demuestra |
+|----------|-------------|------------------|
+| **Hilos (Threads)** | Unidad básica de ejecución | pthread_create/pthread_join, TIDs únicos |
+| **Scheduler/Planificador** | Asigna CPU a hilos | Distribución automática en cores, affinity policy |
+| **PCB / TCB** | Bloques de control de proceso/hilo | TID, PC, stack, estado por hilo |
+| **PCI (Program Counter)** | Dirección de instrucción actual | Evolución del PC en cada hilo |
+| **Cambio de Contexto** | Guardado/restaurado de estado | Context switches detectados en Gantt |
+| **Concurrencia vs Paralelismo** | Múltiples hilos, ejecución simultánea | Speedup > 1 demuestra paralelismo real |
+| **Variables Atómicas** | Lock-free communication | atomic_store/load para progreso |
+| **Memoria Compartida vs Privada** | Datos comunes vs locales | Imagen compartida (RO), buffers privados |
+| **Sincronización** | Coordinación entre hilos | Ausencia de mutex (datos disjuntos) |
+| **Ley de Amdahl** | Límite del speedup | Speedup < N cores por fracción serial |
+| **Overhead de Paralelización** | Costo de crear/gestionar hilos | Análisis de speedup negativo y optimizaciones |
+
+---
+
+## Estructura del Proyecto
+
+```
+SO/
+├── rle_secuencial.c       # Versión secuencial (1 hilo, ~750 líneas)
+├── rle_paralelo.c         # Versión paralela (N hilos, ~850 líneas)
+├── Makefile               # Sistema de compilación
+├── benchmark.sh           # Script de análisis comparativo
+├── run_compresion.sh      # Script unificado con UI visual
+├── gantt_chart.py         # Generador de diagramas de Gantt
+├── stb_image.h           # Biblioteca para carga de imágenes
+├── README.md              # Esta documentación
+├── informe.tex           # Informe completo en LaTeX
+├── captures/             # Capturas de pantalla del desarrollo
+│   ├── cap_00.png - cap_45.png
+│   └── cap_gantt_scheduling.png
+└── image/                # Imágenes de prueba y outputs
+    ├── test-0.jpg, test-1.jpg, test-2.jpg
+    ├── test-africa.png, unsaac.jpg
+    ├── *_secuencial.rle / *_paralelo.rle
+    ├── *_secuencial_descomprimida.bmp / *_paralelo_descomprimida.bmp
+    ├── *_secuencial_gantt.csv / *_paralelo_gantt.csv
+    └── *_gantt_scheduling.png
+```
+
+### Archivos Generados por los Programas
+
+| Extensión | Descripción |
+|-----------|-------------|
+| `.rle` | Archivo comprimido con algoritmo RLE |
+| `_descomprimida.bmp` | Imagen descomprimida para verificación |
+| `_gantt.csv` | Datos de scheduling para gantt_chart.py |
+| `_gantt_scheduling.png` | Diagrama de Gantt visual |
+| `.raw` | Datos crudos en escala de grises |
+
+---
